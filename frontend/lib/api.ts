@@ -28,7 +28,7 @@ const API_BASE =
  *
  * Returns null if the block is empty or missing a data line.
  */
-function parseSSEBlock(block: string): StreamEvent | null {
+export function parseSSEBlock(block: string): StreamEvent | null {
   const lines = block.split("\n");
   let event = "message";
   let data = "";
