@@ -23,6 +23,9 @@ import MessageBubble from "./MessageBubble";
 export default function ChatWindow() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  // Optional ticker scope hint. Sent on each turn; the backend persists it as
+  // ticker_scope so a no-ticker follow-up ("what about its risks?") inherits it.
+  const [ticker, setTicker] = useState("");
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
   const [streaming, setStreaming] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -68,8 +71,12 @@ export default function ChatWindow() {
     // Append an empty assistant message — tokens will accumulate into it
     appendMessage({ role: "assistant", content: "", citations: [] });
 
+    // Pass the ticker as the optional 3rd arg so the backend scopes retrieval and
+    // persists ticker_scope. undefined when blank preserves the optional behavior.
+    const t = ticker.trim() || undefined;
+
     try {
-      for await (const event of streamChat(text, sessionId)) {
+      for await (const event of streamChat(text, sessionId, t)) {
         switch (event.event) {
           case "session":
             // Store session ID so follow-up messages continue the conversation
@@ -140,7 +147,8 @@ export default function ChatWindow() {
               <p>Ask a question about a ticker, e.g.</p>
               <p className="text-blue-400 italic">"Bull case for AAPL"</p>
               <p className="text-gray-600 text-xs mt-4">
-                Pass a ticker explicitly — auto-extraction is Phase 2.
+                Enter a ticker (optional) and ask a question; follow-ups remember
+                the last ticker. Auto-extraction is Phase 2.
               </p>
             </div>
           </div>
@@ -168,6 +176,18 @@ export default function ChatWindow() {
         onSubmit={send}
         className="border-t border-gray-800 px-4 py-3 flex gap-2 bg-gray-950"
       >
+        {/* Ticker scope hint — optional. Kept across sends so follow-ups inherit it. */}
+        <input
+          type="text"
+          value={ticker}
+          onChange={(e) => setTicker(e.target.value.toUpperCase().trim())}
+          placeholder="Ticker"
+          maxLength={10}
+          disabled={streaming}
+          aria-label="Ticker symbol (optional)"
+          className="w-24 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed"
+          autoComplete="off"
+        />
         <input
           ref={inputRef}
           type="text"
