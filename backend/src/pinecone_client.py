@@ -118,6 +118,88 @@ def _get_namespace() -> str:
     return settings.pinecone_namespace
 
 
+def _hit_to_record(h: Any) -> dict:
+    """
+    Convert one integrated-search `Hit` (or dict) into the `_normalize` input shape.
+
+    A Hit exposes `.id`, `.score`, and `.fields` (a flat dict carrying the chunk
+    `text` alongside all metadata).  We split `text` out of the metadata so
+    downstream metadata stays free of the large text blob.
+    """
+    if isinstance(h, dict):
+        hid = h.get("id") or h.get("_id") or ""
+        score = h.get("score", h.get("_score"))
+        fields = dict(h.get("fields") or {})
+    else:
+        hid = getattr(h, "id", None) or getattr(h, "id_", "") or ""
+        score = getattr(h, "score", None)
+        if score is None:
+            score = getattr(h, "score_", None)
+        fields = dict(getattr(h, "fields", None) or {})
+
+    text = fields.get("text")
+    metadata = {k: v for k, v in fields.items() if k != "text"}
+    return {"id": hid, "score": score, "text": text, "metadata": metadata}
+
+
+def _extract_hits(resp: Any) -> list:
+    """
+    Pull the hit list out of a SearchRecordsResponse (`.result.hits`) or the
+    equivalent dict shape used by tests/mocks.
+    """
+    result = getattr(resp, "result", None)
+    if result is not None:
+        hits = getattr(result, "hits", None)
+        if hits is not None:
+            return list(hits)
+    if isinstance(resp, dict):
+        return list((resp.get("result") or {}).get("hits", []) or resp.get("hits", []))
+    # Legacy query-shape fallback (defensive; integrated indexes use search()).
+    matches = getattr(resp, "matches", None)
+    if matches is not None:
+        return list(matches)
+    return []
+
+
+def _list_ids(index: Any, prefix: str, namespace: str) -> list[str]:
+    """
+    Flatten `index.list(prefix=...)` into a flat list of ID strings.
+
+    `index.list()` is a generator that yields one PAGE per iteration. Depending on
+    SDK version a page is a `ListResponse` (with `.vectors` -> `ListItem.id`), a
+    plain list of id strings, or (in mocks) a dict. Handle all shapes — the prior
+    code stringified an entire page object as a single ID, tripping Pinecone's
+    512-char ID limit against the live API.
+    """
+    ids: list[str] = []
+    for page in index.list(prefix=prefix, namespace=namespace):
+        vectors = getattr(page, "vectors", None)
+        if vectors is None and isinstance(page, dict):
+            vectors = page.get("vectors")
+        if vectors is not None:
+            for item in vectors:
+                iid = getattr(item, "id", None)
+                if iid is None and isinstance(item, dict):
+                    iid = item.get("id")
+                if iid is None and isinstance(item, str):
+                    iid = item
+                if iid:
+                    ids.append(str(iid))
+        elif isinstance(page, str):
+            ids.append(page)
+        elif isinstance(page, (list, tuple)):
+            for item in page:
+                if isinstance(item, str):
+                    ids.append(item)
+                else:
+                    iid = getattr(item, "id", None) or (
+                        item.get("id") if isinstance(item, dict) else None
+                    )
+                    if iid:
+                        ids.append(str(iid))
+    return ids
+
+
 def retrieve(
     text: str,
     ticker: Optional[str] = None,
@@ -148,7 +230,7 @@ def retrieve(
 
     # Build a best-effort metadata filter.  Pinecone $eq/$in filters are known to
     # be unreliable on this index; we apply them server-side when non-empty but
-    # ALWAYS post-filter on the returned matches as the authoritative gate.
+    # ALWAYS post-filter on the returned hits as the authoritative gate.
     filter_dict: Optional[dict] = None
     conditions = []
     if ticker:
@@ -160,50 +242,48 @@ def retrieve(
     elif len(conditions) > 1:
         filter_dict = {"$and": conditions}
 
-    query_kwargs: dict[str, Any] = {
-        "namespace": namespace,
-        "top_k": k,
-        "include_metadata": True,
-        "include_values": False,
-    }
+    # The trade-reports index uses Pinecone integrated inference (llama-text-embed-v2,
+    # 1024-d).  Semantic search MUST go through the records `search` API (server-side
+    # text->embedding); the older `query(vector=...)` path needs a 1024-d vector and
+    # cannot embed text, so it is wrong for this index.  When filtering, over-fetch so
+    # enough hits survive the authoritative post-filter, then truncate to k.
+    fetch_k = min(max(k, k * 4), 50) if (ticker or report_type) else k
+    query: dict[str, Any] = {"inputs": {"text": text}, "top_k": fetch_k}
     if filter_dict:
-        query_kwargs["filter"] = filter_dict
+        query["filter"] = filter_dict
 
-    # Pinecone integrated-inference: query by text input
     try:
-        results = index.query(inputs=text, **query_kwargs)
-    except TypeError:
-        # Older SDK versions may not support `inputs=`; fall back to `vector=`
-        # with a zero-vector (graceful degradation — will return arbitrary results
-        # but won't crash).  Real fix: upgrade pinecone SDK to >=5.
-        logger.warning("pinecone_client.retrieve: SDK does not support inputs= kwarg; "
-                       "falling back — results may be unrelated to query text.")
-        results = index.query(vector=[0.0], **query_kwargs)
+        resp = index.search(namespace=namespace, query=query)
+    except Exception as exc:
+        # Server-side filters are best-effort on this index — if the filtered search
+        # fails, retry once unfiltered and let the post-filter below do the gating.
+        if filter_dict:
+            logger.warning(
+                "retrieve: filtered search failed (%s); retrying unfiltered", exc
+            )
+            query.pop("filter", None)
+            resp = index.search(namespace=namespace, query=query)
+        else:
+            raise
 
-    # Use sentinel to distinguish "attribute present but empty" from "attribute absent"
-    _sentinel = object()
-    _matches_attr = getattr(results, "matches", _sentinel)
-    if _matches_attr is not _sentinel:
-        matches = _matches_attr
-    elif isinstance(results, dict):
-        matches = results.get("matches", [])
-    else:
-        matches = []
+    hits = _extract_hits(resp)
 
     chunks: list[dict] = []
-    for m in matches:
+    for h in hits:
         try:
-            chunk = _normalize(m)
+            chunk = _normalize(_hit_to_record(h))
         except UnknownSchemaVersionError as exc:
             logger.error("retrieve: skipping record with unknown schema: %s", exc)
             continue
         # Post-filter (authoritative gate — server-side filter is best-effort only)
         meta = chunk["metadata"]
-        if ticker and meta.get("ticker", "").upper() != ticker.upper():
+        if ticker and str(meta.get("ticker", "")).upper() != ticker.upper():
             continue
-        if report_type and meta.get("report_type", "").upper() != report_type.upper():
+        if report_type and str(meta.get("report_type", "")).upper() != report_type.upper():
             continue
         chunks.append(chunk)
+        if len(chunks) >= k:
+            break
 
     return chunks
 
@@ -231,17 +311,14 @@ def latest(
     prefix = f"{ticker.upper()}:{report_type.upper()}:"
 
     try:
-        id_list = list(index.list(prefix=prefix, namespace=namespace))
+        str_ids = _list_ids(index, prefix, namespace)
     except Exception as exc:
         logger.error("latest: list failed for prefix=%r: %s", prefix, exc)
         return None
 
-    if not id_list:
+    if not str_ids:
         logger.debug("latest: no IDs found for prefix=%r", prefix)
         return None
-
-    # The list() call may return strings or ID objects; normalise to str
-    str_ids = [str(i) if not isinstance(i, str) else i for i in id_list]
 
     # Lexically greatest = newest (YYYYMMDD-HHMM segment in position 2)
     newest_id = max(str_ids)
@@ -287,16 +364,14 @@ def timeline(
     prefix = f"{ticker.upper()}:"
 
     try:
-        id_list = list(index.list(prefix=prefix, namespace=namespace))
+        str_ids = _list_ids(index, prefix, namespace)
     except Exception as exc:
         logger.error("timeline: list failed for prefix=%r: %s", prefix, exc)
         return []
 
-    if not id_list:
+    if not str_ids:
         logger.debug("timeline: no IDs found for prefix=%r", prefix)
         return []
-
-    str_ids = [str(i) if not isinstance(i, str) else i for i in id_list]
 
     # Newest-first: sort descending (lexically largest = most recent timestamp)
     sorted_ids = sorted(str_ids, reverse=True)[:limit]

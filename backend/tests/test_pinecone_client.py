@@ -117,64 +117,110 @@ class TestRetrievePostFilter:
     without touching the live index.
     """
 
+    @staticmethod
+    def _search_hit(_id: str, ticker: str, score: float) -> dict:
+        """An integrated-search hit: id/score/fields (fields carry text + metadata)."""
+        return {
+            "id": _id,
+            "score": score,
+            "fields": {
+                "schema_version": 1,
+                "ticker": ticker,
+                "report_type": "ANALYSIS",
+                "generated_at": "2026-06-01T10:00:00+00:00",
+                "source_path": f"TRADE-ANALYSIS-{ticker}.md",
+                "text": f"{ticker} body text.",
+            },
+        }
+
+    def _fake_index(self, hits: list):
+        """Fake Index exposing the integrated `search` API (records, not query/vector)."""
+        outer = self
+
+        class FakeIndex:
+            def search(self, **kwargs):
+                # Ignore the server-side filter — post-filter is the authoritative gate.
+                return {"result": {"hits": hits}}
+
+        return FakeIndex()
+
     def test_postfilter_removes_wrong_ticker(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """retrieve() must drop results whose ticker doesn't match the requested one."""
         import src.pinecone_client as pc
 
-        # Build fake query results with one matching and one non-matching record
-        fake_matches = [
-            {
-                "id": "AAPL:ANALYSIS:20260601-1000:exec-summary:0",
-                "score": 0.9,
-                "metadata": {
-                    "schema_version": 1,
-                    "ticker": "AAPL",
-                    "report_type": "ANALYSIS",
-                    "generated_at": "2026-06-01T10:00:00+00:00",
-                },
-            },
-            {
-                "id": "MSFT:ANALYSIS:20260601-1000:exec-summary:0",
-                "score": 0.85,
-                "metadata": {
-                    "schema_version": 1,
-                    "ticker": "MSFT",
-                    "report_type": "ANALYSIS",
-                    "generated_at": "2026-06-01T10:00:00+00:00",
-                },
-            },
+        hits = [
+            self._search_hit("AAPL:ANALYSIS:20260601-1000:exec-summary:0", "AAPL", 0.9),
+            self._search_hit("MSFT:ANALYSIS:20260601-1000:exec-summary:0", "MSFT", 0.85),
         ]
-
-        class FakeResult:
-            matches = fake_matches
-
-        class FakeIndex:
-            def query(self, **kwargs):
-                return FakeResult()
-
-        monkeypatch.setattr(pc, "_get_index", lambda: FakeIndex())
+        monkeypatch.setattr(pc, "_get_index", lambda: self._fake_index(hits))
         monkeypatch.setattr(pc, "_get_namespace", lambda: "trade")
 
         results = pc.retrieve("what's the outlook?", ticker="AAPL")
         assert len(results) == 1
         assert results[0]["metadata"]["ticker"] == "AAPL"
+        # text is split out of fields and surfaced on the chunk
+        assert results[0]["text"] == "AAPL body text."
+        # the big text blob is not duplicated into metadata
+        assert "text" not in results[0]["metadata"]
 
     def test_postfilter_empty_results(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """retrieve() returns [] when there are no matches."""
+        """retrieve() returns [] when there are no hits."""
         import src.pinecone_client as pc
 
-        class FakeResult:
-            matches: list = []
-
-        class FakeIndex:
-            def query(self, **kwargs):
-                return FakeResult()
-
-        monkeypatch.setattr(pc, "_get_index", lambda: FakeIndex())
+        monkeypatch.setattr(pc, "_get_index", lambda: self._fake_index([]))
         monkeypatch.setattr(pc, "_get_namespace", lambda: "trade")
 
         results = pc.retrieve("random query")
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — _list_ids page flattening (regression for the live-API ID bug)
+# ---------------------------------------------------------------------------
+
+
+class TestListIdsFlattening:
+    """
+    `index.list()` yields PAGES, not bare IDs.  Against the live API each page is a
+    ListResponse with `.vectors` -> `ListItem.id`.  The prior code stringified a whole
+    page as one ID and tripped Pinecone's 512-char ID limit.  Lock in the flattener.
+    """
+
+    def test_flattens_listresponse_pages(self) -> None:
+        from src.pinecone_client import _list_ids
+
+        class ListItem:
+            def __init__(self, _id):
+                self.id = _id
+
+        class ListResponse:
+            def __init__(self, ids):
+                self.vectors = [ListItem(i) for i in ids]
+
+        class FakeIndex:
+            def list(self, prefix, namespace):
+                # two pages of ListResponse objects
+                yield ListResponse([f"{prefix}20260601-1000:a:0", f"{prefix}20260601-1000:b:1"])
+                yield ListResponse([f"{prefix}20260602-1000:c:0"])
+
+        ids = _list_ids(FakeIndex(), "MARA:", "trade")
+        assert ids == [
+            "MARA:20260601-1000:a:0",
+            "MARA:20260601-1000:b:1",
+            "MARA:20260602-1000:c:0",
+        ]
+        # every element is a short ID string, not a stringified page object
+        assert all(isinstance(i, str) and len(i) < 512 for i in ids)
+
+    def test_flattens_plain_string_pages(self) -> None:
+        """Older SDKs / some configs yield plain id-string lists per page."""
+        from src.pinecone_client import _list_ids
+
+        class FakeIndex:
+            def list(self, prefix, namespace):
+                yield ["MARA:a:0", "MARA:b:1"]
+
+        assert _list_ids(FakeIndex(), "MARA:", "trade") == ["MARA:a:0", "MARA:b:1"]
 
 
 # ---------------------------------------------------------------------------
