@@ -180,7 +180,15 @@ def retrieve(
                        "falling back — results may be unrelated to query text.")
         results = index.query(vector=[0.0], **query_kwargs)
 
-    matches = getattr(results, "matches", None) or results.get("matches", [])
+    # Use sentinel to distinguish "attribute present but empty" from "attribute absent"
+    _sentinel = object()
+    _matches_attr = getattr(results, "matches", _sentinel)
+    if _matches_attr is not _sentinel:
+        matches = _matches_attr
+    elif isinstance(results, dict):
+        matches = results.get("matches", [])
+    else:
+        matches = []
 
     chunks: list[dict] = []
     for m in matches:
