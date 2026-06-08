@@ -73,10 +73,8 @@ export default function ChatWindow() {
 
     // Pass the ticker as the optional 3rd arg so the backend scopes retrieval and
     // persists ticker_scope. undefined when blank preserves the optional behavior.
-    const t = ticker.trim() || undefined;
-
     try {
-      for await (const event of streamChat(text, sessionId, t)) {
+      for await (const event of streamChat(text, sessionId, ticker.trim() || undefined)) {
         switch (event.event) {
           case "session":
             // Store session ID so follow-up messages continue the conversation
