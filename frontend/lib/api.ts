@@ -4,11 +4,13 @@
  * streamChat(message, sessionId?, ticker?) POSTs to the backend and yields
  * parsed SSE events {event, data} as they arrive.
  *
- * SSE wire format (blank-line delimited, per 01-CONTEXT.md locked order):
- *   event: session\ndata: <uuid>\n\n
- *   event: citations\ndata: <JSON Citation[]>\n\n
- *   event: token\ndata: <partial token>\n\n   (repeated)
- *   event: done\ndata: \n\n
+ * SSE wire format (per 01-CONTEXT.md locked order). The backend uses sse-starlette,
+ * which emits CRLF-delimited events — `\r\n` field lines, `\r\n\r\n` event separators:
+ *   event: session\r\ndata: <uuid>\r\n\r\n
+ *   event: citations\r\ndata: <JSON Citation[]>\r\n\r\n
+ *   event: token\r\ndata: <partial token>\r\n\r\n   (repeated)
+ *   event: done\r\ndata: \r\n\r\n
+ * The parser tolerates BOTH CRLF and bare-LF wire formats (see the split regexes).
  *
  * Security: This module never calls dangerouslySetInnerHTML or renders raw HTML.
  * The backend URL comes from NEXT_PUBLIC_API_BASE (public env var — safe to expose).
@@ -29,7 +31,10 @@ const API_BASE =
  * Returns null if the block is empty or missing a data line.
  */
 export function parseSSEBlock(block: string): StreamEvent | null {
-  const lines = block.split("\n");
+  // Split on \r?\n so each field line is parsed whether the wire used \r\n (CRLF,
+  // as sse-starlette emits) or bare \n. This strips any trailing \r, so data:
+  // payloads carry no \r and JSON.parse of the citations payload succeeds.
+  const lines = block.split(/\r?\n/);
   let event = "message";
   let data = "";
 
@@ -106,8 +111,9 @@ export async function* streamChat(
       // Append the new chunk to our rolling buffer
       buffer += decoder.decode(value, { stream: true });
 
-      // SSE events are delimited by blank lines (\n\n)
-      const parts = buffer.split("\n\n");
+      // SSE events are delimited by a blank line. sse-starlette emits CRLF
+      // (\r\n\r\n); tolerate bare-LF (\n\n) too for backward compatibility.
+      const parts = buffer.split(/\r\n\r\n|\n\n/);
 
       // The last part may be an incomplete block — keep it in the buffer
       buffer = parts.pop() ?? "";
