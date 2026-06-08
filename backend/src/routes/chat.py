@@ -1,7 +1,7 @@
 """
-routes/chat.py — POST /chat RAG endpoint (history-aware, slice 3).
+routes/chat.py — POST /chat (non-streaming) and POST /chat/stream (SSE) endpoints.
 
-Five-step flow:
+Non-streaming flow (POST /chat, slice 2–3):
   1. Resolve session_id + load prior conversation history.
   2. Retrieve up to k=6 semantic chunks from Pinecone.
      Coreference: when req.ticker is None, inherit the most recent non-null
@@ -11,25 +11,40 @@ Five-step flow:
   4. Call llm_client.complete() with SYSTEM_PROMPT + history messages + user prompt.
   5. Persist user + assistant turns; return ChatResponse.
 
+Streaming flow (POST /chat/stream, slice 4):
+  Same steps 1–3, then:
+  4. Open an SSE EventSourceResponse that emits events in order:
+       event: session  (the session_id)
+       event: citations  (JSON list of Citation objects — once, up front)
+       event: token  (one per yielded chunk from stream_complete)
+       event: done
+  5. Buffer all tokens; on completion append_turn for user + assistant.
+  6. Mid-stream LLMProviderError → emit a terminating error event then done,
+     never leaking key material or stack traces (T-05-02).
+
 No-data path (VERIFY-NODATA, T-03-02):
   When retrieve() returns zero chunks the route short-circuits to a graceful
   fixed response: "I don't have stored analysis for <TICKER>; would you like
   live market data instead?" with citations=[].  No fabricated citations, no
-  hallucinated source paths.
+  hallucinated source paths.  The streaming variant emits the graceful message
+  as a single token event so the frontend can render it incrementally.
 
-Error handling (T-03-03):
-  LLMProviderError from llm_client → HTTP 503 with generic body "LLM provider
-  unavailable". No key or stack trace is included in the response.
+Error handling (T-03-03 / T-05-02):
+  LLMProviderError from llm_client → HTTP 503 (non-streaming) or a terminating
+  SSE error event + done (streaming).  No key or stack trace in the response.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
+from typing import AsyncGenerator
 
 from fastapi import APIRouter, HTTPException
+from sse_starlette.sse import EventSourceResponse
 
-from src.llm_client import LLMProviderError, complete
+from src.llm_client import LLMProviderError, complete, stream_complete
 from src.pinecone_client import retrieve
 from src.prompts import SYSTEM_PROMPT, rag_user_prompt
 from src.schemas import ChatRequest, ChatResponse, Citation
@@ -149,3 +164,116 @@ def post_chat(req: ChatRequest) -> ChatResponse:
         citations=citations,
         session_id=session_id,
     )
+
+
+@router.post("/chat/stream")
+def post_chat_stream(req: ChatRequest) -> EventSourceResponse:
+    """Streaming SSE RAG chat endpoint (slice 4).
+
+    Emits SSE events in the locked order (01-CONTEXT.md):
+      1. event: session   — the session_id (minted or supplied)
+      2. event: citations — JSON list of Citation objects, once up front
+      3. event: token     — one per token yielded by stream_complete
+      4. event: done      — signals the stream is complete
+
+    Full assistant text is buffered and both user + assistant turns are
+    persisted to the session store on completion.
+
+    Mid-stream LLMProviderError emits a terminating `event: error` then
+    `event: done` — no key material or stack trace in the payload (T-05-02).
+
+    Citations are serialised from real chunk metadata (T-05-03 — no injection).
+    """
+
+    async def _event_generator() -> AsyncGenerator[dict, None]:
+        # --- Step 1: Resolve session_id + load history ---
+        session_id: str = req.session_id or str(uuid.uuid4())
+        prior_turns = history(session_id, limit=_HISTORY_LIMIT)
+
+        # Emit session event immediately so the client has the ID
+        yield {"event": "session", "data": session_id}
+
+        # --- Coreference: inherit ticker from history when not supplied ---
+        if req.ticker is not None:
+            effective_ticker = req.ticker.upper()
+        else:
+            effective_ticker = next(
+                (t.ticker_scope for t in reversed(prior_turns) if t.ticker_scope),
+                None,
+            )
+
+        ticker_upper = effective_ticker  # may be None
+
+        # --- Step 2: Retrieve chunks ---
+        try:
+            chunks = retrieve(req.message, ticker=ticker_upper, k=_RETRIEVE_K)
+        except Exception as exc:
+            logger.error("post_chat_stream: Pinecone retrieval failed: %s", exc)
+            chunks = []
+
+        # --- Build citations list from real chunk metadata only (T-05-03) ---
+        citations: list[Citation] = []
+        for chunk in chunks:
+            meta = chunk.get("metadata") or {}
+            source_path = meta.get("source_path", "")
+            generated_date = meta.get("generated_date", "")
+            chunk_ticker = meta.get("ticker", "")
+            report_type = meta.get("report_type", "")
+            if source_path and generated_date and chunk_ticker and report_type:
+                citations.append(
+                    Citation(
+                        source_path=source_path,
+                        generated_date=generated_date,
+                        ticker=chunk_ticker,
+                        report_type=report_type,
+                    )
+                )
+
+        # --- Emit citations event ONCE, before any token (01-CONTEXT.md locked order) ---
+        yield {
+            "event": "citations",
+            "data": json.dumps([c.model_dump() for c in citations]),
+        }
+
+        # --- No-data path: graceful message as a single token, then done ---
+        if not chunks:
+            ticker_label = ticker_upper or "the requested ticker"
+            graceful_message = (
+                f"I don't have stored analysis for {ticker_label}; "
+                "would you like live market data instead?"
+            )
+            yield {"event": "token", "data": graceful_message}
+            append_turn(session_id, "user", req.message, ticker=req.ticker)
+            append_turn(session_id, "assistant", graceful_message, ticker=ticker_upper)
+            yield {"event": "done", "data": ""}
+            return
+
+        # --- Step 3: Build messages list (history + new grounded user prompt) ---
+        history_messages: list[dict] = [
+            {"role": t.role, "content": t.content}
+            for t in prior_turns
+        ]
+        user_prompt = rag_user_prompt(req.message, chunks)
+        messages = history_messages + [{"role": "user", "content": user_prompt}]
+
+        # --- Step 4: Stream tokens, buffering for persistence ---
+        full_response_parts: list[str] = []
+        try:
+            for token in stream_complete(system=SYSTEM_PROMPT, messages=messages):
+                full_response_parts.append(token)
+                yield {"event": "token", "data": token}
+        except LLMProviderError as exc:
+            logger.error("post_chat_stream: LLM provider error mid-stream: %s", exc)
+            # Emit a terminating error event — no key/stack trace (T-05-02)
+            yield {"event": "error", "data": "LLM provider unavailable"}
+            yield {"event": "done", "data": ""}
+            return
+
+        # --- Step 5: Persist both turns on completion ---
+        assistant_text = "".join(full_response_parts)
+        append_turn(session_id, "user", req.message, ticker=req.ticker)
+        append_turn(session_id, "assistant", assistant_text, ticker=ticker_upper)
+
+        yield {"event": "done", "data": ""}
+
+    return EventSourceResponse(_event_generator())
