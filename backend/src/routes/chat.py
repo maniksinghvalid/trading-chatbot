@@ -62,6 +62,7 @@ import src.market_data as market_data
 from src.market_data import QuoteUnavailableError
 from src.pinecone_client import retrieve
 from src.prompts import SYSTEM_PROMPT, rag_user_prompt
+from src.rate_limiter import BudgetExceeded, check_and_increment
 from src.schemas import ChatRequest, ChatResponse, Citation
 from src.session_store import append_turn, history
 from src.ticker_extractor import extract_tickers
@@ -116,6 +117,17 @@ def post_chat(
     graceful "I don't have stored analysis for <TICKER>" message with an empty
     citations list — never a fabricated citation (VERIFY-NODATA / T-03-02).
     """
+    # --- Rate limit gate (RATE-01): check per-user daily budget BEFORE any work ---
+    # user_id is taken from the validated JWT (T-02-05-03 — not from request body).
+    try:
+        check_and_increment(user_id)
+    except BudgetExceeded as exc:
+        raise HTTPException(
+            status_code=429,
+            detail="daily budget exceeded",
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        )
+
     # --- Step 1: Resolve session_id + load history ---
     session_id: str = req.session_id or str(uuid.uuid4())
 
@@ -384,5 +396,18 @@ def post_chat_stream(
         )
 
         yield {"event": "done", "data": ""}
+
+    # --- Rate limit gate (RATE-01): check BEFORE opening SSE stream ---
+    # Must be checked here (not inside _event_generator) so a 429 is a normal
+    # HTTP response rather than an SSE event — client can read Retry-After header.
+    # user_id comes from the JWT (T-02-05-03 — not from request body).
+    try:
+        check_and_increment(user_id)
+    except BudgetExceeded as exc:
+        raise HTTPException(
+            status_code=429,
+            detail="daily budget exceeded",
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        )
 
     return EventSourceResponse(_event_generator())
