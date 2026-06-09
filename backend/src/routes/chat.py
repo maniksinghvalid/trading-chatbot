@@ -3,23 +3,26 @@ routes/chat.py — POST /chat (non-streaming) and POST /chat/stream (SSE) endpoi
 
 Non-streaming flow (POST /chat, slice 2–3):
   1. Resolve session_id + load prior conversation history.
-  2. Retrieve up to k=6 semantic chunks from Pinecone.
-     Coreference: when req.ticker is None, inherit the most recent non-null
-     ticker_scope from the session history so follow-up turns stay on the
-     in-scope ticker (T-04-02: parameterized queries only — no string SQL).
-  3. Build the grounded user prompt via rag_user_prompt().
-  4. Call llm_client.complete() with SYSTEM_PROMPT + history messages + user prompt.
-  5. Persist user + assistant turns; return ChatResponse.
+  2. Extract tickers from message via extract_tickers(); classify intent via classify_intent().
+     Ticker resolution order: explicit req.ticker > first extracted ticker > coreference from
+     session history (ticker_scope inheritance). (Slice 6 / TICK-01)
+  3. Retrieve up to k=6 semantic chunks from Pinecone.
+     Coreference: when req.ticker is None and extraction finds nothing, inherit the most recent
+     non-null ticker_scope from the session history so follow-up turns stay on the in-scope
+     ticker (T-04-02: parameterized queries only — no string SQL).
+  4. Build the grounded user prompt via rag_user_prompt().
+  5. Call llm_client.complete() with SYSTEM_PROMPT + history messages + user prompt.
+  6. Persist user + assistant turns; return ChatResponse.
 
 Streaming flow (POST /chat/stream, slice 4):
-  Same steps 1–3, then:
-  4. Open an SSE EventSourceResponse that emits events in order:
+  Same steps 1–4, then:
+  5. Open an SSE EventSourceResponse that emits events in order:
        event: session  (the session_id)
        event: citations  (JSON list of Citation objects — once, up front)
        event: token  (one per yielded chunk from stream_complete)
        event: done
-  5. Buffer all tokens; on completion append_turn for user + assistant.
-  6. Mid-stream LLMProviderError → emit a terminating error event then done,
+  6. Buffer all tokens; on completion append_turn for user + assistant.
+  7. Mid-stream LLMProviderError → emit a terminating error event then done,
      never leaking key material or stack traces (T-05-02).
 
 No-data path (VERIFY-NODATA, T-03-02):
@@ -44,11 +47,13 @@ from typing import AsyncGenerator
 from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
+from src.intent_classifier import classify_intent
 from src.llm_client import LLMProviderError, complete, stream_complete
 from src.pinecone_client import retrieve
 from src.prompts import SYSTEM_PROMPT, rag_user_prompt
 from src.schemas import ChatRequest, ChatResponse, Citation
 from src.session_store import append_turn, history
+from src.ticker_extractor import extract_tickers
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +84,20 @@ def post_chat(req: ChatRequest) -> ChatResponse:
 
     prior_turns = history(session_id, limit=_HISTORY_LIMIT)
 
-    # Coreference: inherit the most recent non-null ticker_scope from history
-    # when the caller doesn't supply an explicit ticker.
+    # --- Slice 6 / TICK-01: Extract tickers + classify intent from the message ---
+    # extract_tickers() handles both explicit symbols and company-name mentions.
+    extracted = extract_tickers(req.message)
+    # classify_intent() is stored for slice 7 (live-quote gating); no behavior change yet.
+    _intent_result = classify_intent(req.message)
+
+    # Ticker resolution order (three-tier fallback):
+    #   1. Explicit req.ticker (caller-supplied, highest precedence)
+    #   2. First ticker extracted from the message text (TICK-01)
+    #   3. Coreference: inherit most-recent non-null ticker_scope from history
     if req.ticker is not None:
-        effective_ticker = req.ticker.upper()
+        effective_ticker: str | None = req.ticker.upper()
+    elif extracted:
+        effective_ticker = extracted[0]
     else:
         effective_ticker = next(
             (t.ticker_scope for t in reversed(prior_turns) if t.ticker_scope),
@@ -193,9 +208,19 @@ def post_chat_stream(req: ChatRequest) -> EventSourceResponse:
         # Emit session event immediately so the client has the ID
         yield {"event": "session", "data": session_id}
 
-        # --- Coreference: inherit ticker from history when not supplied ---
+        # --- Slice 6 / TICK-01: Extract tickers + classify intent from the message ---
+        extracted = extract_tickers(req.message)
+        # classify_intent() stored for slice 7 (live-quote gating); no behavior change yet.
+        _intent_result = classify_intent(req.message)
+
+        # Ticker resolution order (three-tier fallback):
+        #   1. Explicit req.ticker (caller-supplied, highest precedence)
+        #   2. First ticker extracted from the message text (TICK-01)
+        #   3. Coreference: inherit most-recent non-null ticker_scope from history
         if req.ticker is not None:
             effective_ticker = req.ticker.upper()
+        elif extracted:
+            effective_ticker = extracted[0]
         else:
             effective_ticker = next(
                 (t.ticker_scope for t in reversed(prior_turns) if t.ticker_scope),

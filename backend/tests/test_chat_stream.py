@@ -4,6 +4,7 @@ test_chat_stream.py — tests for POST /chat/stream SSE endpoint (slice 4).
 All tests run fully offline:
   - stream_complete is mocked to yield a controlled list of token chunks
   - Pinecone retrieve is mocked to control chunk data
+  - extract_tickers and classify_intent are stubbed via autouse fixture (slice 6)
   - Session store uses a temp-file SQLite fixture for test isolation.
     NOTE: SQLite in-memory databases (sqlite:///:memory:) are connection-scoped —
     each new connection opens a fresh empty DB, so cross-thread access (as happens
@@ -110,6 +111,22 @@ def _parse_sse_events(body: bytes) -> list[dict]:
     if current:
         events.append(current)
     return events
+
+
+@pytest.fixture(autouse=True)
+def stub_extractor_and_classifier(monkeypatch):
+    """Stub extract_tickers and classify_intent so stream tests run fully offline.
+
+    Overrides the route-level imports to avoid LLM calls from these modules.
+    """
+    monkeypatch.setattr(
+        "src.routes.chat.extract_tickers",
+        lambda text: [],
+    )
+    monkeypatch.setattr(
+        "src.routes.chat.classify_intent",
+        lambda text: {"intent": "factual", "tickers": []},
+    )
 
 
 @pytest.fixture

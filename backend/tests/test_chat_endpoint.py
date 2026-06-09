@@ -4,6 +4,7 @@ test_chat_endpoint.py — tests for POST /chat RAG endpoint.
 All tests use FastAPI TestClient + monkeypatching so they run fully offline:
   - OpenAI calls are mocked by monkeypatching llm_client.complete
   - Pinecone retrieve is mocked to control chunk data
+  - extract_tickers and classify_intent are stubbed so LLM fallback is never hit
 
 Test coverage:
   - Happy path: chunks returned → answer + citations[] + session_id
@@ -11,6 +12,7 @@ Test coverage:
   - No-data path (VERIFY-NODATA): zero chunks → graceful message + citations==[]
   - LLM error path: complete() raises LLMProviderError → HTTP 503
   - Citations built from real chunk metadata only (no fabrication)
+  - Ticker auto-resolution (TICK-01): "how is apple doing" → AAPL passed into retrieve
 """
 
 from __future__ import annotations
@@ -76,6 +78,25 @@ _FAKE_LLM_ANSWER = (
 def client():
     """FastAPI TestClient using the real app instance."""
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def stub_extractor_and_classifier(monkeypatch):
+    """Stub extract_tickers and classify_intent in the chat route so every test
+    runs fully offline without triggering LLM calls from those modules.
+
+    Individual tests that want to assert on extractor/classifier behaviour
+    can override these stubs via their own monkeypatch calls.
+    """
+    # Default stubs: return empty (no ticker extracted, factual intent)
+    monkeypatch.setattr(
+        "src.routes.chat.extract_tickers",
+        lambda text: [],
+    )
+    monkeypatch.setattr(
+        "src.routes.chat.classify_intent",
+        lambda text: {"intent": "factual", "tickers": []},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -249,3 +270,59 @@ def test_post_chat_pinecone_error_returns_graceful(client, monkeypatch):
     # Treated as no-data: empty citations
     assert data["citations"] == []
     assert len(data["message"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# TICK-01: Auto ticker resolution tests (slice 6)
+# ---------------------------------------------------------------------------
+
+
+def test_post_chat_auto_ticker_from_message(client, monkeypatch):
+    """TICK-01: 'how is apple doing' (no req.ticker) resolves AAPL via extract_tickers.
+
+    The mocked extract_tickers returns ["AAPL"], so the route uses that as the
+    effective ticker — even though the request body has no 'ticker' field.
+    Asserts that retrieve() is called with ticker="AAPL".
+    """
+    retrieve_calls: list[dict] = []
+
+    def _capturing_retrieve(text, ticker=None, k=6):
+        retrieve_calls.append({"text": text, "ticker": ticker})
+        return _FAKE_CHUNKS
+
+    # Override the autouse stub: extract_tickers returns AAPL for this test
+    monkeypatch.setattr(
+        "src.routes.chat.extract_tickers",
+        lambda text: ["AAPL"],
+    )
+    monkeypatch.setattr("src.routes.chat.retrieve", _capturing_retrieve)
+    monkeypatch.setattr("src.routes.chat.complete", lambda *a, **kw: _FAKE_LLM_ANSWER)
+
+    resp = client.post("/chat", json={"message": "how is apple doing"})
+    assert resp.status_code == 200
+
+    assert len(retrieve_calls) == 1, "retrieve must be called exactly once"
+    assert retrieve_calls[0]["ticker"] == "AAPL", (
+        f"Expected retrieve called with ticker='AAPL', got {retrieve_calls[0]['ticker']!r}"
+    )
+
+
+def test_post_chat_explicit_ticker_wins_over_extraction(client, monkeypatch):
+    """Explicit req.ticker takes precedence over extracted tickers (TICK-01)."""
+    retrieve_calls: list[dict] = []
+
+    def _capturing_retrieve(text, ticker=None, k=6):
+        retrieve_calls.append({"ticker": ticker})
+        return _FAKE_CHUNKS
+
+    # extract_tickers would return NVDA, but explicit ticker is AAPL
+    monkeypatch.setattr(
+        "src.routes.chat.extract_tickers",
+        lambda text: ["NVDA"],
+    )
+    monkeypatch.setattr("src.routes.chat.retrieve", _capturing_retrieve)
+    monkeypatch.setattr("src.routes.chat.complete", lambda *a, **kw: _FAKE_LLM_ANSWER)
+
+    resp = client.post("/chat", json={"message": "tell me about it", "ticker": "AAPL"})
+    assert resp.status_code == 200
+    assert retrieve_calls[0]["ticker"] == "AAPL"
