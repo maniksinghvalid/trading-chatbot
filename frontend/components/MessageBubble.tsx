@@ -9,20 +9,81 @@
  * - No rehype plugins that allow arbitrary HTML injection
  *
  * This ensures LLM output cannot inject executable HTML/JS into the DOM.
+ *
+ * Polish additions (POLISH-01):
+ * - Assistant messages with a quote show a QuoteCard above the text body.
+ * - Citations render as expandable CitationCards instead of the flat list.
+ * - Ticker symbols detected in assistant content are wrapped in TickerChip.
  */
 
 import ReactMarkdown from "react-markdown";
 import type { Citation, Message } from "@/lib/types";
+import CitationCard from "./CitationCard";
+import QuoteCard from "./QuoteCard";
+import TickerChip from "./TickerChip";
 
 interface MessageBubbleProps {
   message: Message;
 }
 
 /**
- * Sources list rendered below assistant bubbles when citations are present.
- * Renders only fields emitted by the backend from real chunk metadata (T-06-03).
+ * Detect uppercase ticker symbols in text that appear in the citations list.
+ * Returns a set of ticker strings found in the message body.
+ *
+ * Strategy: collect all unique tickers from citations, then check which ones
+ * appear as whole words in the message content. This avoids false positives
+ * (e.g. "I", "A") by only highlighting tickers the backend actually cited.
  */
-function Sources({ citations }: { citations: Citation[] }) {
+function detectTickers(content: string, citations: Citation[]): Set<string> {
+  const citedTickers = new Set(
+    citations.map((c) => c.ticker).filter(Boolean)
+  );
+  const found = new Set<string>();
+  for (const ticker of citedTickers) {
+    // Word-boundary match so "AAPL" doesn't trigger inside "SAAPLN"
+    const re = new RegExp(`\\b${ticker}\\b`);
+    if (re.test(content)) {
+      found.add(ticker);
+    }
+  }
+  return found;
+}
+
+/**
+ * Split plain text into segments, wrapping detected ticker symbols in TickerChip.
+ * Preserves the surrounding text as plain string nodes.
+ *
+ * Called only for the plain-text representation of the message (used in the
+ * ticker-chip overlay layer), not inside ReactMarkdown (which handles its own
+ * rendering). This function is intentionally kept outside the ReactMarkdown
+ * render tree to preserve T-06-01.
+ */
+function renderWithTickerChips(
+  text: string,
+  tickers: Set<string>
+): React.ReactNode[] {
+  if (tickers.size === 0) return [text];
+
+  // Build a single regex from all tickers, longest first to avoid prefix clobber
+  const sorted = [...tickers].sort((a, b) => b.length - a.length);
+  const pattern = sorted.map((t) => `\\b${t}\\b`).join("|");
+  const re = new RegExp(`(${pattern})`, "g");
+
+  const parts = text.split(re);
+  return parts.map((part, i) =>
+    tickers.has(part) ? (
+      <TickerChip key={`${part}-${i}`} ticker={part} />
+    ) : (
+      part
+    )
+  );
+}
+
+/**
+ * Citations section rendered below assistant bubbles.
+ * Each citation renders as an expandable CitationCard.
+ */
+function Citations({ citations }: { citations: Citation[] }) {
   if (!citations || citations.length === 0) return null;
 
   return (
@@ -30,24 +91,19 @@ function Sources({ citations }: { citations: Citation[] }) {
       <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">
         Sources
       </p>
-      <ol className="space-y-1">
+      <div className="space-y-1.5">
         {citations.map((c, i) => (
-          <li key={`${c.source_path}-${i}`} className="text-xs text-gray-400">
-            <span className="font-mono text-gray-500">[{i + 1}]</span>{" "}
-            <span className="text-gray-300">{c.source_path}</span>
-            <span className="text-gray-600"> &bull; </span>
-            <span className="text-blue-400">{c.report_type}</span>
-            <span className="text-gray-600"> &bull; </span>
-            <span>{c.generated_date}</span>
-          </li>
+          <CitationCard key={`${c.source_path}-${i}`} citation={c} index={i} />
         ))}
-      </ol>
+      </div>
     </div>
   );
 }
 
 export default function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.role === "user";
+  const citations = message.citations ?? [];
+  const tickers = isUser ? new Set<string>() : detectTickers(message.content, citations);
 
   return (
     <div
@@ -60,6 +116,11 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
             : "bg-gray-800 text-gray-100 rounded-bl-sm"
         }`}
       >
+        {/* Live quote card — shown above the text body for assistant messages (02-02) */}
+        {!isUser && message.quote && (
+          <QuoteCard quote={message.quote} />
+        )}
+
         {/* ReactMarkdown renders LLM output safely — no rehype-raw, no raw HTML (T-06-01) */}
         <div className="prose prose-sm prose-invert max-w-none">
           <ReactMarkdown
@@ -94,15 +155,35 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
                   </code>
                 );
               },
+              // Override paragraph to inject TickerChip for detected tickers (T-06-01 preserved:
+              // we split plain text strings only — no raw HTML, no dangerouslySetInnerHTML)
+              p: ({ children }) => {
+                if (tickers.size === 0 || isUser) {
+                  return <p>{children}</p>;
+                }
+                // Map each child node: string nodes get ticker-chip splitting, others pass through
+                const enhanced = Array.isArray(children)
+                  ? children.flatMap((child, i) =>
+                      typeof child === "string"
+                        ? renderWithTickerChips(child, tickers).map((node, j) => (
+                            <span key={`tc-${i}-${j}`}>{node}</span>
+                          ))
+                        : [<span key={`pass-${i}`}>{child}</span>]
+                    )
+                  : typeof children === "string"
+                  ? renderWithTickerChips(children, tickers)
+                  : children;
+                return <p>{enhanced}</p>;
+              },
             }}
           >
             {message.content || (isUser ? "" : "■")}
           </ReactMarkdown>
         </div>
 
-        {/* Sources list — only rendered for assistant messages with citations */}
-        {!isUser && message.citations && message.citations.length > 0 && (
-          <Sources citations={message.citations} />
+        {/* Citations — only rendered for assistant messages with citations */}
+        {!isUser && citations.length > 0 && (
+          <Citations citations={citations} />
         )}
       </div>
     </div>
