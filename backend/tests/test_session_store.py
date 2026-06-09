@@ -11,10 +11,16 @@ Test coverage:
   - Multi-session: history only returns turns for the requested session_id.
   - list_sessions: groups by session_id; first user message is the title.
   - Coreference: second turn with no ticker inherits prior ticker_scope from history.
+  - retrieved_chunk_ids: JSON audit column round-trips (None, [], and list).
+  - Cross-backend parity: fresh engine (restart simulation) shows sessions persisted.
+  - Postgres integration (requires @pytest.mark.postgres + live DATABASE_URL): same
+    full turn cycle against a real Postgres instance (skipped without DSN).
 """
 
 from __future__ import annotations
 
+import os
+import tempfile
 import uuid
 from datetime import datetime
 
@@ -306,3 +312,118 @@ def test_retrieved_chunk_ids_empty_list_stored_without_error():
 
     turns = history(sid)
     assert turns[1].retrieved_chunk_ids == []
+
+
+# ---------------------------------------------------------------------------
+# Cross-backend parity (restart simulation) — DB-01
+# ---------------------------------------------------------------------------
+
+def _run_full_turn_cycle(db_url: str) -> None:
+    """
+    Exercise the full append_turn → history → list_sessions cycle including
+    user_id and retrieved_chunk_ids, using a fresh engine at the given URL.
+
+    This helper is called once with a temp-file SQLite URL (parity proxy) and
+    optionally a second time against a real Postgres URL.  Two engines are
+    created sequentially to simulate an application restart — data written on
+    the first engine must be visible on the second (proves schema migrates
+    cleanly via create_all and that sessions survive a restart).
+    """
+    connect_args = {}
+    if db_url.startswith("sqlite"):
+        connect_args = {"check_same_thread": False}
+
+    # --- First engine: write data ---
+    engine1 = create_engine(db_url, connect_args=connect_args)
+    SQLModel.metadata.create_all(engine1)
+
+    sid = str(uuid.uuid4())
+    user = "parity@example.com"
+    chunk_ids = ["AAPL:ANALYSIS:2024-01-15:0", "AAPL:ANALYSIS:2024-01-15:1"]
+
+    # Monkeypatch the module-level engine for append_turn / history
+    orig_engine = ss.engine
+    ss.engine = engine1
+    try:
+        append_turn(sid, "user", "bull case for AAPL", ticker="AAPL", user_id=user)
+        append_turn(
+            sid, "assistant", "AAPL looks strong...", ticker="AAPL",
+            user_id=user, retrieved_chunk_ids=chunk_ids,
+        )
+    finally:
+        ss.engine = orig_engine
+
+    engine1.dispose()
+
+    # --- Second engine (same URL) — simulate restart: data must persist ---
+    engine2 = create_engine(db_url, connect_args=connect_args)
+    SQLModel.metadata.create_all(engine2)
+
+    ss.engine = engine2
+    try:
+        turns = history(sid)
+        sessions = list_sessions(user)
+    finally:
+        ss.engine = orig_engine
+
+    engine2.dispose()
+
+    # --- Assertions ---
+    assert len(turns) == 2, f"Expected 2 turns after restart, got {len(turns)}"
+
+    user_turn = turns[0]
+    asst_turn = turns[1]
+
+    assert user_turn.role == "user"
+    assert user_turn.user_id == user
+    assert user_turn.ticker_scope == "AAPL"
+    assert user_turn.retrieved_chunk_ids is None
+
+    assert asst_turn.role == "assistant"
+    assert asst_turn.user_id == user
+    assert asst_turn.retrieved_chunk_ids == chunk_ids
+
+    assert len(sessions) == 1
+    assert sessions[0]["session_id"] == sid
+    assert sessions[0]["title"] == "bull case for AAPL"
+
+
+def test_cross_backend_parity_sqlite_restart_simulation():
+    """
+    Full turn cycle (user_id + retrieved_chunk_ids) persists across a fresh
+    engine bound to the same temp-file SQLite URL — simulates application
+    restart on the SQLite backend (Postgres parity proxy).
+
+    This is the offline gate for DB-01: proves SQLModel create_all builds the
+    schema cleanly and sessions survive between engine instances.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    try:
+        db_url = f"sqlite:///{db_path}"
+        _run_full_turn_cycle(db_url)
+    finally:
+        try:
+            os.unlink(db_path)
+        except OSError:
+            pass  # Cleanup best-effort
+
+
+@pytest.mark.postgres
+def test_cross_backend_parity_postgres_integration():
+    """
+    Full turn cycle (user_id + retrieved_chunk_ids) against a real Postgres
+    instance — proves the schema migrates cleanly via SQLModel create_all.
+
+    Skipped automatically when DATABASE_URL is not set to a Postgres DSN.
+    To run:
+        docker compose up -d   (from trading-chatbot/)
+        export DATABASE_URL=postgresql+psycopg://chatbot:chatbot@localhost:5432/chatbot
+        uv run pytest -m postgres
+    """
+    db_url = os.environ.get("DATABASE_URL", "")
+    assert db_url.startswith("postgresql"), (
+        "DATABASE_URL must be a postgresql+psycopg:// DSN for this test"
+    )
+    _run_full_turn_cycle(db_url)
