@@ -1,0 +1,42 @@
+# docker-compose.yml — local development stack for trading-chatbot
+#
+# Services:
+#   db  — Postgres 16 (the production database target, DB-01)
+#
+# Usage:
+#   docker compose up -d       # start Postgres in the background
+#   docker compose down        # stop and remove containers
+#   docker compose down -v     # also remove the pgdata volume (full reset)
+#
+# The backend auto-creates all tables via SQLModel.metadata.create_all() on first
+# boot — no migration tool required at this scale.  Switching from the default
+# SQLite to this Postgres instance requires only the DATABASE_URL env var:
+#
+#   export DATABASE_URL=postgresql+psycopg://chatbot:chatbot@localhost:5432/chatbot
+#   uv run uvicorn src.main:app --reload
+#
+# See backend/.env.example for a full environment template.
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: trading-chatbot-db
+    environment:
+      POSTGRES_DB: chatbot
+      POSTGRES_USER: chatbot
+      POSTGRES_PASSWORD: chatbot
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatbot -d chatbot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+    driver: local
