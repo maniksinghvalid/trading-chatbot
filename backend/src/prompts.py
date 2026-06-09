@@ -123,8 +123,28 @@ def rag_user_prompt(
             lines.append(meta_header)
             lines.append(text)
 
-    # live_quote is reserved for slice 7; accept the argument but skip rendering.
-    # When wired in slice 7, insert a "## Live Quote" subsection here.
+    # Slice 7 — Live Quote inset (rendered when live_quote is not None).
+    # The quote is ~15 min delayed (yfinance); the inset notes the delay so
+    # the LLM can accurately represent staleness to the user (T-02-02-03).
+    if live_quote is not None:
+        price = live_quote.get("price", "N/A")
+        day_change_pct = live_quote.get("day_change_pct", "N/A")
+        volume = live_quote.get("volume", "N/A")
+        timestamp = live_quote.get("timestamp", "N/A")
+        source = live_quote.get("source", "yfinance")
+
+        lines.append("\n## Live Quote")
+        lines.append(
+            f"Price: {price}  |  Day change: {day_change_pct:.2f}%"
+            if isinstance(day_change_pct, (int, float))
+            else f"Price: {price}  |  Day change: {day_change_pct}"
+        )
+        lines.append(f"Volume: {volume}")
+        lines.append(f"As of: {timestamp}  (source: {source})")
+        lines.append(
+            "Note: This quote is approximately 15 minutes delayed. "
+            "Do not treat it as a real-time price."
+        )
 
     lines.append("\n# Question")
     lines.append(question)

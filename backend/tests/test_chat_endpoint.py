@@ -22,6 +22,8 @@ from fastapi.testclient import TestClient
 
 from src.main import app
 from src.llm_client import LLMProviderError
+import src.market_data as market_data
+from src.market_data import QuoteUnavailableError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -326,3 +328,122 @@ def test_post_chat_explicit_ticker_wins_over_extraction(client, monkeypatch):
     resp = client.post("/chat", json={"message": "tell me about it", "ticker": "AAPL"})
     assert resp.status_code == 200
     assert retrieve_calls[0]["ticker"] == "AAPL"
+
+
+# ---------------------------------------------------------------------------
+# QUOTE-01: Intent-gated live quote injection tests (slice 7)
+# ---------------------------------------------------------------------------
+
+_FAKE_QUOTE = {
+    "price": 189.75,
+    "day_change_pct": 1.23,
+    "volume": 55_000_000,
+    "timestamp": "2026-06-09T14:00:00+00:00",
+    "source": "yfinance",
+}
+
+
+def test_post_chat_price_question_calls_quote(client, monkeypatch):
+    """POST /chat with 'trading at' intent calls market_data.quote(ticker)."""
+    quote_calls: list[str] = []
+
+    def _capturing_quote(ticker: str) -> dict:
+        quote_calls.append(ticker)
+        return _FAKE_QUOTE
+
+    monkeypatch.setattr("src.routes.chat.extract_tickers", lambda text: ["AAPL"])
+    monkeypatch.setattr(
+        "src.routes.chat.classify_intent",
+        lambda text: {"intent": "factual", "tickers": ["AAPL"]},
+    )
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.complete", lambda *a, **kw: _FAKE_LLM_ANSWER)
+    monkeypatch.setattr(market_data, "quote", _capturing_quote)
+
+    resp = client.post("/chat", json={"message": "what's AAPL trading at?", "ticker": "AAPL"})
+    assert resp.status_code == 200
+
+    assert len(quote_calls) == 1, (
+        f"Expected quote() called once for price question, got {len(quote_calls)} calls"
+    )
+    assert quote_calls[0] == "AAPL"
+
+
+def test_post_chat_price_question_prompt_contains_live_quote(client, monkeypatch):
+    """POST /chat with price intent renders '## Live Quote' in the LLM prompt."""
+    captured_messages: list[list] = []
+
+    def _capturing_complete(system, messages):
+        captured_messages.extend(messages)
+        return _FAKE_LLM_ANSWER
+
+    monkeypatch.setattr("src.routes.chat.extract_tickers", lambda text: ["AAPL"])
+    monkeypatch.setattr(
+        "src.routes.chat.classify_intent",
+        lambda text: {"intent": "factual", "tickers": ["AAPL"]},
+    )
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.complete", _capturing_complete)
+    monkeypatch.setattr(market_data, "quote", lambda ticker: _FAKE_QUOTE)
+
+    resp = client.post(
+        "/chat", json={"message": "what's AAPL trading at right now?", "ticker": "AAPL"}
+    )
+    assert resp.status_code == 200
+
+    # The last message (user prompt) must contain the live quote inset
+    user_msg = next(m for m in reversed(captured_messages) if m["role"] == "user")
+    assert "Live Quote" in user_msg["content"], (
+        "LLM prompt must contain '## Live Quote' inset for price questions"
+    )
+
+
+def test_post_chat_outlook_question_does_not_call_quote(client, monkeypatch):
+    """POST /chat with 'what's the outlook for AAPL?' does NOT call market_data.quote()."""
+    quote_calls: list[str] = []
+
+    def _tracking_quote(ticker: str) -> dict:
+        quote_calls.append(ticker)
+        return _FAKE_QUOTE
+
+    monkeypatch.setattr("src.routes.chat.extract_tickers", lambda text: ["AAPL"])
+    monkeypatch.setattr(
+        "src.routes.chat.classify_intent",
+        lambda text: {"intent": "trajectory", "tickers": ["AAPL"]},
+    )
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.complete", lambda *a, **kw: _FAKE_LLM_ANSWER)
+    monkeypatch.setattr(market_data, "quote", _tracking_quote)
+
+    resp = client.post(
+        "/chat", json={"message": "what's the outlook for AAPL?", "ticker": "AAPL"}
+    )
+    assert resp.status_code == 200
+
+    assert len(quote_calls) == 0, (
+        f"Expected quote() NOT called for outlook question, got {len(quote_calls)} calls"
+    )
+
+
+def test_post_chat_quote_unavailable_degrades_gracefully(client, monkeypatch):
+    """QuoteUnavailableError from market_data.quote() does not fail the chat response."""
+    def _failing_quote(ticker: str) -> dict:
+        raise QuoteUnavailableError("provider down")
+
+    monkeypatch.setattr("src.routes.chat.extract_tickers", lambda text: ["AAPL"])
+    monkeypatch.setattr(
+        "src.routes.chat.classify_intent",
+        lambda text: {"intent": "factual", "tickers": ["AAPL"]},
+    )
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.complete", lambda *a, **kw: _FAKE_LLM_ANSWER)
+    monkeypatch.setattr(market_data, "quote", _failing_quote)
+
+    resp = client.post(
+        "/chat", json={"message": "what's AAPL trading at?", "ticker": "AAPL"}
+    )
+    # Chat must succeed even when quote provider is down
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "message" in data
+    assert len(data["message"]) > 0

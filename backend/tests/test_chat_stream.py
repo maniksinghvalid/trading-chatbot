@@ -33,6 +33,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import src.session_store as ss
+import src.market_data as market_data
+from src.market_data import QuoteUnavailableError
 from sqlmodel import create_engine
 from sqlmodel import SQLModel
 
@@ -456,3 +458,138 @@ def test_stream_citations_content(client, monkeypatch):
     assert c["generated_date"] == "20240101"
     assert c["ticker"] == "AAPL"
     assert c["report_type"] == "ANALYSIS"
+
+
+# ---------------------------------------------------------------------------
+# QUOTE-01: SSE quote event tests (slice 7)
+# ---------------------------------------------------------------------------
+
+_FAKE_QUOTE = {
+    "price": 189.75,
+    "day_change_pct": 1.23,
+    "volume": 55_000_000,
+    "timestamp": "2026-06-09T14:00:00+00:00",
+    "source": "yfinance",
+}
+
+
+def test_stream_price_question_emits_quote_event(client, monkeypatch):
+    """Price-intent stream emits event: quote after citations and before first token."""
+    monkeypatch.setattr(
+        "src.routes.chat.classify_intent",
+        lambda text: {"intent": "factual", "tickers": ["AAPL"]},
+    )
+    monkeypatch.setattr("src.routes.chat.extract_tickers", lambda text: ["AAPL"])
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
+    monkeypatch.setattr(market_data, "quote", lambda ticker: _FAKE_QUOTE)
+
+    resp = client.post(
+        "/chat/stream",
+        json={"message": "what's AAPL trading at?", "ticker": "AAPL"},
+    )
+    assert resp.status_code == 200
+
+    events = _parse_sse_events(resp.content)
+    event_names = [e["event"] for e in events if "event" in e]
+
+    assert "quote" in event_names, f"Expected event: quote in stream, got: {event_names}"
+
+    # quote must come after citations and before first token
+    citations_idx = event_names.index("citations")
+    quote_idx = event_names.index("quote")
+    first_token_idx = event_names.index("token")
+
+    assert citations_idx < quote_idx, "quote event must come after citations"
+    assert quote_idx < first_token_idx, "quote event must come before first token"
+
+
+def test_stream_price_question_quote_event_payload(client, monkeypatch):
+    """event: quote carries valid JSON with the five quote fields."""
+    monkeypatch.setattr(
+        "src.routes.chat.classify_intent",
+        lambda text: {"intent": "factual", "tickers": ["AAPL"]},
+    )
+    monkeypatch.setattr("src.routes.chat.extract_tickers", lambda text: ["AAPL"])
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
+    monkeypatch.setattr(market_data, "quote", lambda ticker: _FAKE_QUOTE)
+
+    resp = client.post(
+        "/chat/stream",
+        json={"message": "what's AAPL trading at right now?", "ticker": "AAPL"},
+    )
+    events = _parse_sse_events(resp.content)
+    quote_event = next((e for e in events if e.get("event") == "quote"), None)
+
+    assert quote_event is not None, "event: quote must be present for price questions"
+    payload = json.loads(quote_event["data"])
+    for key in ("price", "day_change_pct", "volume", "timestamp", "source"):
+        assert key in payload, f"quote event payload missing key: {key}"
+    assert payload["source"] == "yfinance"
+
+
+def test_stream_outlook_question_no_quote_event(client, monkeypatch):
+    """Outlook/trajectory intent does NOT emit event: quote."""
+    monkeypatch.setattr(
+        "src.routes.chat.classify_intent",
+        lambda text: {"intent": "trajectory", "tickers": ["AAPL"]},
+    )
+    monkeypatch.setattr("src.routes.chat.extract_tickers", lambda text: ["AAPL"])
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
+
+    quote_calls: list[str] = []
+
+    def _tracking_quote(ticker: str) -> dict:
+        quote_calls.append(ticker)
+        return _FAKE_QUOTE
+
+    monkeypatch.setattr(market_data, "quote", _tracking_quote)
+
+    resp = client.post(
+        "/chat/stream",
+        json={"message": "what's the outlook for AAPL?", "ticker": "AAPL"},
+    )
+    events = _parse_sse_events(resp.content)
+    event_names = [e["event"] for e in events if "event" in e]
+
+    assert "quote" not in event_names, (
+        f"Outlook question must NOT emit event: quote, got events: {event_names}"
+    )
+    assert len(quote_calls) == 0, (
+        f"Outlook question must NOT call market_data.quote(), got {len(quote_calls)} calls"
+    )
+
+
+def test_stream_quote_unavailable_no_quote_event(client, monkeypatch):
+    """When QuoteUnavailableError is raised, no event: quote is emitted and stream continues."""
+    monkeypatch.setattr(
+        "src.routes.chat.classify_intent",
+        lambda text: {"intent": "factual", "tickers": ["AAPL"]},
+    )
+    monkeypatch.setattr("src.routes.chat.extract_tickers", lambda text: ["AAPL"])
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
+
+    def _failing_quote(ticker: str) -> dict:
+        raise QuoteUnavailableError("provider down")
+
+    monkeypatch.setattr(market_data, "quote", _failing_quote)
+
+    resp = client.post(
+        "/chat/stream",
+        json={"message": "what's AAPL trading at?", "ticker": "AAPL"},
+    )
+    assert resp.status_code == 200
+
+    events = _parse_sse_events(resp.content)
+    event_names = [e["event"] for e in events if "event" in e]
+
+    # No quote event when provider is down
+    assert "quote" not in event_names, (
+        "When QuoteUnavailableError is raised, no event: quote should be emitted"
+    )
+    # But the stream should still complete with tokens and done
+    assert "token" in event_names
+    assert "done" in event_names

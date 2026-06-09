@@ -10,16 +10,17 @@ Non-streaming flow (POST /chat, slice 2–3):
      Coreference: when req.ticker is None and extraction finds nothing, inherit the most recent
      non-null ticker_scope from the session history so follow-up turns stay on the in-scope
      ticker (T-04-02: parameterized queries only — no string SQL).
-  4. Build the grounded user prompt via rag_user_prompt().
+  4. Build the grounded user prompt via rag_user_prompt(), with live_quote when intent-gated.
   5. Call llm_client.complete() with SYSTEM_PROMPT + history messages + user prompt.
   6. Persist user + assistant turns; return ChatResponse.
 
 Streaming flow (POST /chat/stream, slice 4):
   Same steps 1–4, then:
-  5. Open an SSE EventSourceResponse that emits events in order:
-       event: session  (the session_id)
+  5. Open an SSE EventSourceResponse that emits events in order (01-CONTEXT.md locked order):
+       event: session    (the session_id)
        event: citations  (JSON list of Citation objects — once, up front)
-       event: token  (one per yielded chunk from stream_complete)
+       event: quote      (JSON quote dict — ONLY for price-intent requests, slice 7)
+       event: token      (one per yielded chunk from stream_complete)
        event: done
   6. Buffer all tokens; on completion append_turn for user + assistant.
   7. Mid-stream LLMProviderError → emit a terminating error event then done,
@@ -35,6 +36,13 @@ No-data path (VERIFY-NODATA, T-03-02):
 Error handling (T-03-03 / T-05-02):
   LLMProviderError from llm_client → HTTP 503 (non-streaming) or a terminating
   SSE error event + done (streaming).  No key or stack trace in the response.
+
+Live-quote intent gating (slice 7 / QUOTE-01):
+  A quote is fetched ONLY when intent=="factual" AND a price-keyword family
+  (now/current/today/price/"trading at"/quote) is present in the message AND
+  a ticker is resolved.  Outlook/thesis questions pass live_quote=None and
+  emit no quote event.  QuoteUnavailableError degrades gracefully (live_quote=None);
+  the chat continues without a quote rather than failing the request.
 """
 
 from __future__ import annotations
@@ -49,6 +57,8 @@ from sse_starlette.sse import EventSourceResponse
 
 from src.intent_classifier import classify_intent
 from src.llm_client import LLMProviderError, complete, stream_complete
+import src.market_data as market_data
+from src.market_data import QuoteUnavailableError
 from src.pinecone_client import retrieve
 from src.prompts import SYSTEM_PROMPT, rag_user_prompt
 from src.schemas import ChatRequest, ChatResponse, Citation
@@ -64,6 +74,26 @@ _RETRIEVE_K: int = 6
 
 # History window sent to the LLM (limits context size and cost)
 _HISTORY_LIMIT: int = 10
+
+# Price-keyword family (slice 7): triggers live-quote fetch when intent=="factual"
+# and the message contains at least one of these terms (case-insensitive).
+_PRICE_KEYWORDS: frozenset[str] = frozenset(
+    {"now", "current", "today", "price", "trading at", "quote"}
+)
+
+
+def _wants_live_quote(intent: str, message: str, ticker: str | None) -> bool:
+    """Return True when a live price quote should be fetched.
+
+    Criteria (all three must hold):
+      - intent is "factual" (classifier signal)
+      - at least one price keyword is present in the (lowercased) message
+      - an effective ticker has been resolved (not None)
+    """
+    if intent != "factual" or ticker is None:
+        return False
+    msg_lower = message.lower()
+    return any(kw in msg_lower for kw in _PRICE_KEYWORDS)
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -87,8 +117,9 @@ def post_chat(req: ChatRequest) -> ChatResponse:
     # --- Slice 6 / TICK-01: Extract tickers + classify intent from the message ---
     # extract_tickers() handles both explicit symbols and company-name mentions.
     extracted = extract_tickers(req.message)
-    # classify_intent() is stored for slice 7 (live-quote gating); no behavior change yet.
-    _intent_result = classify_intent(req.message)
+    # classify_intent() drives slice 7 live-quote gating.
+    intent_result = classify_intent(req.message)
+    intent = intent_result.get("intent", "factual")
 
     # Ticker resolution order (three-tier fallback):
     #   1. Explicit req.ticker (caller-supplied, highest precedence)
@@ -130,6 +161,17 @@ def post_chat(req: ChatRequest) -> ChatResponse:
             session_id=session_id,
         )
 
+    # --- Slice 7 / QUOTE-01: Fetch live quote when price-intent detected ---
+    # Degrades gracefully on QuoteUnavailableError — chat continues without quote.
+    live_quote = None
+    if _wants_live_quote(intent, req.message, ticker_upper):
+        try:
+            live_quote = market_data.quote(ticker_upper)
+            logger.info("post_chat: fetched live quote for %s", ticker_upper)
+        except QuoteUnavailableError as exc:
+            logger.warning("post_chat: quote unavailable for %s: %s", ticker_upper, exc)
+            live_quote = None  # degrade gracefully
+
     # --- Step 3: Build messages list (history + new grounded user prompt) ---
     # Convert prior turns into the OpenAI messages format so the LLM has context
     history_messages: list[dict] = [
@@ -137,7 +179,7 @@ def post_chat(req: ChatRequest) -> ChatResponse:
         for t in prior_turns
     ]
 
-    user_prompt = rag_user_prompt(req.message, chunks)
+    user_prompt = rag_user_prompt(req.message, chunks, live_quote=live_quote)
     messages = history_messages + [{"role": "user", "content": user_prompt}]
 
     # --- Step 4: Call LLM ---
@@ -210,8 +252,9 @@ def post_chat_stream(req: ChatRequest) -> EventSourceResponse:
 
         # --- Slice 6 / TICK-01: Extract tickers + classify intent from the message ---
         extracted = extract_tickers(req.message)
-        # classify_intent() stored for slice 7 (live-quote gating); no behavior change yet.
-        _intent_result = classify_intent(req.message)
+        # classify_intent() drives slice 7 live-quote gating.
+        intent_result = classify_intent(req.message)
+        intent = intent_result.get("intent", "factual")
 
         # Ticker resolution order (three-tier fallback):
         #   1. Explicit req.ticker (caller-supplied, highest precedence)
@@ -273,12 +316,30 @@ def post_chat_stream(req: ChatRequest) -> EventSourceResponse:
             yield {"event": "done", "data": ""}
             return
 
+        # --- Slice 7 / QUOTE-01: Fetch live quote + emit quote event (price-intent only) ---
+        # The event: quote is emitted AFTER citations and BEFORE the first token,
+        # extending the locked SSE order without reordering existing events.
+        live_quote = None
+        if _wants_live_quote(intent, req.message, ticker_upper):
+            try:
+                live_quote = market_data.quote(ticker_upper)
+                logger.info("post_chat_stream: fetched live quote for %s", ticker_upper)
+                yield {
+                    "event": "quote",
+                    "data": json.dumps(live_quote),
+                }
+            except QuoteUnavailableError as exc:
+                logger.warning(
+                    "post_chat_stream: quote unavailable for %s: %s", ticker_upper, exc
+                )
+                live_quote = None  # degrade gracefully; no quote event emitted
+
         # --- Step 3: Build messages list (history + new grounded user prompt) ---
         history_messages: list[dict] = [
             {"role": t.role, "content": t.content}
             for t in prior_turns
         ]
-        user_prompt = rag_user_prompt(req.message, chunks)
+        user_prompt = rag_user_prompt(req.message, chunks, live_quote=live_quote)
         messages = history_messages + [{"role": "user", "content": user_prompt}]
 
         # --- Step 4: Stream tokens, buffering for persistence ---
