@@ -13,6 +13,7 @@ dependencies = [
   "psycopg[binary]>=3.2",
   "sse-starlette>=2.1",
   "httpx>=0.27",
+  "yfinance>=1.4.1",
 ]
 
 [dependency-groups]
