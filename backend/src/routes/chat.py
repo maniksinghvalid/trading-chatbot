@@ -220,8 +220,13 @@ def post_chat(
             )
 
     # --- Step 6: Persist both turns and return ChatResponse ---
+    # Record retrieved chunk IDs on the assistant turn for audit (DB-01).
+    chunk_ids: list[str] = [c["id"] for c in chunks if c.get("id")]
     append_turn(session_id, "user", req.message, ticker=req.ticker, user_id=user_id)
-    append_turn(session_id, "assistant", answer, ticker=ticker_upper, user_id=user_id)
+    append_turn(
+        session_id, "assistant", answer, ticker=ticker_upper, user_id=user_id,
+        retrieved_chunk_ids=chunk_ids,
+    )
 
     return ChatResponse(
         message=answer,
@@ -369,9 +374,14 @@ def post_chat_stream(
             return
 
         # --- Step 5: Persist both turns on completion ---
+        # Record retrieved chunk IDs on the assistant turn for audit (DB-01).
+        chunk_ids: list[str] = [c["id"] for c in chunks if c.get("id")]
         assistant_text = "".join(full_response_parts)
         append_turn(session_id, "user", req.message, ticker=req.ticker, user_id=user_id)
-        append_turn(session_id, "assistant", assistant_text, ticker=ticker_upper, user_id=user_id)
+        append_turn(
+            session_id, "assistant", assistant_text, ticker=ticker_upper, user_id=user_id,
+            retrieved_chunk_ids=chunk_ids,
+        )
 
         yield {"event": "done", "data": ""}
 

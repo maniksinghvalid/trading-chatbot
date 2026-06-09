@@ -261,3 +261,48 @@ def test_inherited_ticker_uses_most_recent_non_null():
 
     # Most recent non-null is TSLA (turn_index 3)
     assert prior_ticker == "TSLA"
+
+
+# ---------------------------------------------------------------------------
+# retrieved_chunk_ids audit column (DB-01)
+# ---------------------------------------------------------------------------
+
+def test_retrieved_chunk_ids_round_trips_list():
+    """append_turn round-trips a list of chunk IDs through the DB."""
+    sid = str(uuid.uuid4())
+    chunk_ids = ["AAPL:ANALYSIS:2024-01-15:0", "AAPL:ANALYSIS:2024-01-15:1"]
+    append_turn(sid, "user", "bull case for AAPL", ticker="AAPL")
+    append_turn(
+        sid, "assistant", "AAPL looks strong...", ticker="AAPL",
+        retrieved_chunk_ids=chunk_ids,
+    )
+
+    turns = history(sid)
+    assert len(turns) == 2
+    user_turn = turns[0]
+    asst_turn = turns[1]
+    # User turns should have None (not set)
+    assert user_turn.retrieved_chunk_ids is None
+    # Assistant turn should have the exact list back
+    assert asst_turn.retrieved_chunk_ids == chunk_ids
+
+
+def test_retrieved_chunk_ids_none_stored_without_error():
+    """append_turn with retrieved_chunk_ids=None persists cleanly (no-data path)."""
+    sid = str(uuid.uuid4())
+    append_turn(sid, "user", "what's the market doing?", ticker=None)
+    append_turn(sid, "assistant", "No data found.", ticker=None, retrieved_chunk_ids=None)
+
+    turns = history(sid)
+    assert len(turns) == 2
+    assert turns[1].retrieved_chunk_ids is None
+
+
+def test_retrieved_chunk_ids_empty_list_stored_without_error():
+    """append_turn with retrieved_chunk_ids=[] (empty list) persists cleanly."""
+    sid = str(uuid.uuid4())
+    append_turn(sid, "user", "question", ticker=None)
+    append_turn(sid, "assistant", "reply", ticker=None, retrieved_chunk_ids=[])
+
+    turns = history(sid)
+    assert turns[1].retrieved_chunk_ids == []

@@ -7,11 +7,15 @@ satisfy T-04-02 (SQL injection via session_id mitigated).
 Schema:
   Turn: id (uuid str, PK), session_id (str, indexed), turn_index (int),
         role (str: "user"|"assistant"), content (str), ticker_scope (str|None),
-        user_id (str, indexed), created_at (datetime).
+        user_id (str, indexed), retrieved_chunk_ids (list[str]|None, JSON),
+        created_at (datetime).
 
 Functions:
-  append_turn(session_id, role, content, ticker=None, user_id="")
+  append_turn(session_id, role, content, ticker=None, user_id="",
+              retrieved_chunk_ids=None)
       Persists a new Turn.  turn_index is auto-incremented per session.
+      retrieved_chunk_ids records which Pinecone chunk IDs informed this turn
+      (audit trail; stored as JSON so it works on both SQLite and Postgres).
 
   history(session_id, limit=20, user_id=None) -> list[Turn]
       Returns turns for the session ordered oldest-first (turn_index ASC).
@@ -30,6 +34,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import Column, JSON
 from sqlmodel import Field, SQLModel, Session, create_engine, select
 
 from src.config import settings
@@ -49,6 +54,12 @@ class Turn(SQLModel, table=True):
     content: str
     ticker_scope: Optional[str] = Field(default=None)
     user_id: str = Field(default="", index=True)
+    # Audit column: Pinecone chunk IDs that informed this turn (assistant turns).
+    # Stored as JSON so it round-trips cleanly on both SQLite and Postgres.
+    # None for user turns and no-data-path assistant turns; [] is also valid.
+    retrieved_chunk_ids: Optional[list[str]] = Field(
+        default=None, sa_column=Column(JSON)
+    )
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -74,6 +85,7 @@ def append_turn(
     content: str,
     ticker: Optional[str] = None,
     user_id: str = "",
+    retrieved_chunk_ids: Optional[list[str]] = None,
 ) -> Turn:
     """Append a new turn to the conversation.
 
@@ -87,6 +99,9 @@ def append_turn(
         content: The raw message text.
         ticker: The active ticker for this turn (may be None for follow-ups).
         user_id: The authenticated user who owns this turn (email, from JWT sub).
+        retrieved_chunk_ids: List of Pinecone chunk IDs that informed this
+            assistant turn (audit column, DB-01). None for user turns and
+            no-data-path turns; stored as JSON (cross-backend compatible).
 
     Returns:
         The persisted Turn instance.
@@ -108,6 +123,7 @@ def append_turn(
             content=content,
             ticker_scope=ticker,
             user_id=user_id,
+            retrieved_chunk_ids=retrieved_chunk_ids,
         )
         db.add(turn)
         db.commit()
