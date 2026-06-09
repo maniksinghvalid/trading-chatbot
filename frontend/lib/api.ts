@@ -1,5 +1,6 @@
 /**
- * api.ts — Async generator client for the backend /chat/stream SSE endpoint.
+ * api.ts — Async generator client for the backend /chat/stream SSE endpoint,
+ * plus helpers for the session list/history endpoints.
  *
  * streamChat(message, sessionId?, ticker?) POSTs to the backend and yields
  * parsed SSE events {event, data} as they arrive.
@@ -8,6 +9,7 @@
  * which emits CRLF-delimited events — `\r\n` field lines, `\r\n\r\n` event separators:
  *   event: session\r\ndata: <uuid>\r\n\r\n
  *   event: citations\r\ndata: <JSON Citation[]>\r\n\r\n
+ *   event: quote\r\ndata: <JSON Quote>\r\n\r\n  (price-intent only, added 02-02)
  *   event: token\r\ndata: <partial token>\r\n\r\n   (repeated)
  *   event: done\r\ndata: \r\n\r\n
  * The parser tolerates BOTH CRLF and bare-LF wire formats (see the split regexes).
@@ -16,7 +18,7 @@
  * The backend URL comes from NEXT_PUBLIC_API_BASE (public env var — safe to expose).
  */
 
-import type { ChatRequest, StreamEvent } from "./types";
+import type { ChatRequest, SessionSummary, SessionTurn, StreamEvent } from "./types";
 
 /** Backend base URL, defaulting to local FastAPI dev server. */
 const API_BASE =
@@ -162,4 +164,62 @@ export async function* streamChat(
   } finally {
     reader.releaseLock();
   }
+}
+
+/**
+ * Fetch the list of sessions owned by the authenticated user.
+ *
+ * GET /sessions — returns [{session_id, title}, ...] filtered to the current JWT sub.
+ * Attaches the Bearer token from localStorage (same pattern as streamChat).
+ *
+ * Throws on non-2xx HTTP responses (e.g. 401 when token is absent/expired).
+ */
+export async function fetchSessions(): Promise<SessionSummary[]> {
+  const token = getStoredToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  const response = await fetch(`${API_BASE}/sessions`, { headers });
+
+  if (!response.ok) {
+    throw new Error(
+      `GET /sessions returned ${response.status}: ${response.statusText}`
+    );
+  }
+
+  return (await response.json()) as SessionSummary[];
+}
+
+/**
+ * Fetch the full turn history for a session.
+ *
+ * GET /sessions/{session_id} — returns [{role, content, created_at}, ...].
+ * Attaches the Bearer token. Ownership is enforced by the backend (T-02-03-02).
+ *
+ * Throws on non-2xx responses.
+ */
+export async function fetchSessionTurns(sessionId: string): Promise<SessionTurn[]> {
+  const token = getStoredToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  const response = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}`, {
+    headers,
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `GET /sessions/${sessionId} returned ${response.status}: ${response.statusText}`
+    );
+  }
+
+  return (await response.json()) as SessionTurn[];
 }

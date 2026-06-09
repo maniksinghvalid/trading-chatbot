@@ -6,6 +6,7 @@
  * Handles SSE event flow from the backend /chat/stream endpoint:
  *   event=session   → store sessionId for conversation continuity
  *   event=citations → attach citations to the current assistant message
+ *   event=quote     → attach live market-data quote to the current assistant message (02-02)
  *   event=token     → accumulate into the current assistant message content
  *   event=done      → stop streaming, set streaming=false
  *   event=error     → render error message, stop streaming
@@ -13,23 +14,60 @@
  * Session continuity: sessionId is kept in state across sends so every
  * follow-up message continues the same conversation (coreference resolution
  * in the backend uses ticker_scope from prior turns).
+ *
+ * Session restore (POLISH-01): accepts an optional initialMessages/initialSessionId
+ * pair so the SessionList sidebar can load a prior session's full history.
  */
 
 import { useRef, useEffect, useState, FormEvent } from "react";
 import { streamChat } from "@/lib/api";
-import type { Citation, Message } from "@/lib/types";
+import type { Citation, Message, Quote } from "@/lib/types";
 import MessageBubble from "./MessageBubble";
 
-export default function ChatWindow() {
-  const [messages, setMessages] = useState<Message[]>([]);
+interface ChatWindowProps {
+  /**
+   * Called whenever the active session_id changes (new session or restored session),
+   * so the parent can pass it down to SessionList for visual highlighting.
+   */
+  onSessionChange?: (sessionId: string) => void;
+  /**
+   * Pre-loaded messages to restore when the user clicks a session in the sidebar.
+   * Passing a new array replaces the current messages state.
+   */
+  initialMessages?: Message[];
+  /**
+   * Pre-loaded session UUID to continue when restoring a sidebar session.
+   */
+  initialSessionId?: string;
+}
+
+export default function ChatWindow({
+  onSessionChange,
+  initialMessages,
+  initialSessionId,
+}: ChatWindowProps) {
+  const [messages, setMessages] = useState<Message[]>(initialMessages ?? []);
   const [input, setInput] = useState("");
   // Optional ticker scope hint. Sent on each turn; the backend persists it as
   // ticker_scope so a no-ticker follow-up ("what about its risks?") inherits it.
   const [ticker, setTicker] = useState("");
-  const [sessionId, setSessionId] = useState<string | undefined>(undefined);
+  const [sessionId, setSessionId] = useState<string | undefined>(initialSessionId);
   const [streaming, setStreaming] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // When the parent loads a new session (sidebar click), replace messages + sessionId
+  useEffect(() => {
+    if (initialMessages !== undefined) {
+      setMessages(initialMessages);
+    }
+  }, [initialMessages]);
+
+  useEffect(() => {
+    if (initialSessionId !== undefined) {
+      setSessionId(initialSessionId);
+    }
+  }, [initialSessionId]);
 
   // Auto-scroll to the bottom whenever messages update
   useEffect(() => {
@@ -79,6 +117,7 @@ export default function ChatWindow() {
           case "session":
             // Store session ID so follow-up messages continue the conversation
             setSessionId(event.data);
+            onSessionChange?.(event.data);
             break;
 
           case "citations": {
@@ -91,6 +130,20 @@ export default function ChatWindow() {
               parsed = [];
             }
             updateLastMessage((prev) => ({ ...prev, citations: parsed }));
+            break;
+          }
+
+          case "quote": {
+            // Live market-data quote (price-intent only, from 02-02)
+            let parsedQuote: Quote | undefined;
+            try {
+              parsedQuote = JSON.parse(event.data) as Quote;
+            } catch {
+              parsedQuote = undefined;
+            }
+            if (parsedQuote) {
+              updateLastMessage((prev) => ({ ...prev, quote: parsedQuote }));
+            }
             break;
           }
 
