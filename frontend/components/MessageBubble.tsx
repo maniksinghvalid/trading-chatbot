@@ -16,14 +16,19 @@
  * - Ticker symbols detected in assistant content are wrapped in TickerChip.
  */
 
-import ReactMarkdown from "react-markdown";
 import type { Citation, Message } from "@/lib/types";
 import CitationCard from "./CitationCard";
 import QuoteCard from "./QuoteCard";
-import TickerChip from "./TickerChip";
+import StreamingMarkdown from "./StreamingMarkdown";
 
 interface MessageBubbleProps {
   message: Message;
+  /**
+   * Pass true when this bubble is the assistant's actively-streaming message.
+   * Forwarded to StreamingMarkdown to enable debounced parsing during streaming
+   * and immediate flush on completion.
+   */
+  isStreaming?: boolean;
 }
 
 /**
@@ -50,36 +55,6 @@ function detectTickers(content: string, citations: Citation[]): Set<string> {
 }
 
 /**
- * Split plain text into segments, wrapping detected ticker symbols in TickerChip.
- * Preserves the surrounding text as plain string nodes.
- *
- * Called only for the plain-text representation of the message (used in the
- * ticker-chip overlay layer), not inside ReactMarkdown (which handles its own
- * rendering). This function is intentionally kept outside the ReactMarkdown
- * render tree to preserve T-06-01.
- */
-function renderWithTickerChips(
-  text: string,
-  tickers: Set<string>
-): React.ReactNode[] {
-  if (tickers.size === 0) return [text];
-
-  // Build a single regex from all tickers, longest first to avoid prefix clobber
-  const sorted = [...tickers].sort((a, b) => b.length - a.length);
-  const pattern = sorted.map((t) => `\\b${t}\\b`).join("|");
-  const re = new RegExp(`(${pattern})`, "g");
-
-  const parts = text.split(re);
-  return parts.map((part, i) =>
-    tickers.has(part) ? (
-      <TickerChip key={`${part}-${i}`} ticker={part} />
-    ) : (
-      part
-    )
-  );
-}
-
-/**
  * Citations section rendered below assistant bubbles.
  * Each citation renders as an expandable CitationCard.
  */
@@ -100,7 +75,7 @@ function Citations({ citations }: { citations: Citation[] }) {
   );
 }
 
-export default function MessageBubble({ message }: MessageBubbleProps) {
+export default function MessageBubble({ message, isStreaming = false }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const citations = message.citations ?? [];
   const tickers = isUser ? new Set<string>() : detectTickers(message.content, citations);
@@ -121,65 +96,22 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
           <QuoteCard quote={message.quote} />
         )}
 
-        {/* ReactMarkdown renders LLM output safely — no rehype-raw, no raw HTML (T-06-01) */}
-        <div className="prose prose-sm prose-invert max-w-none">
-          <ReactMarkdown
-            components={{
-              // Override anchor to open in new tab safely
-              a: ({ href, children }) => (
-                <a
-                  href={href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-blue-400 underline"
-                >
-                  {children}
-                </a>
-              ),
-              // Override code blocks for better styling
-              code: ({ className, children, ...props }) => {
-                const isInline = !className;
-                return isInline ? (
-                  <code
-                    className="bg-gray-700 px-1 py-0.5 rounded text-xs font-mono"
-                    {...props}
-                  >
-                    {children}
-                  </code>
-                ) : (
-                  <code
-                    className={`block bg-gray-900 p-3 rounded text-xs font-mono overflow-x-auto ${className ?? ""}`}
-                    {...props}
-                  >
-                    {children}
-                  </code>
-                );
-              },
-              // Override paragraph to inject TickerChip for detected tickers (T-06-01 preserved:
-              // we split plain text strings only — no raw HTML, no dangerouslySetInnerHTML)
-              p: ({ children }) => {
-                if (tickers.size === 0 || isUser) {
-                  return <p>{children}</p>;
-                }
-                // Map each child node: string nodes get ticker-chip splitting, others pass through
-                const enhanced = Array.isArray(children)
-                  ? children.flatMap((child, i) =>
-                      typeof child === "string"
-                        ? renderWithTickerChips(child, tickers).map((node, j) => (
-                            <span key={`tc-${i}-${j}`}>{node}</span>
-                          ))
-                        : [<span key={`pass-${i}`}>{child}</span>]
-                    )
-                  : typeof children === "string"
-                  ? renderWithTickerChips(children, tickers)
-                  : children;
-                return <p>{enhanced}</p>;
-              },
-            }}
-          >
-            {message.content || (isUser ? "" : "■")}
-          </ReactMarkdown>
-        </div>
+        {/*
+          Assistant messages use StreamingMarkdown for debounced incremental rendering
+          (smooth token streaming, flush on completion). User messages are static —
+          rendered through the same safe ReactMarkdown config inside StreamingMarkdown.
+          T-06-01: StreamingMarkdown uses no rehype-raw, no dangerouslySetInnerHTML.
+        */}
+        {isUser ? (
+          /* User bubbles: static plain text — no markdown parsing needed */
+          <p className="whitespace-pre-wrap">{message.content}</p>
+        ) : (
+          <StreamingMarkdown
+            content={message.content}
+            streaming={isStreaming}
+            tickers={tickers}
+          />
+        )}
 
         {/* Citations — only rendered for assistant messages with citations */}
         {!isUser && citations.length > 0 && (

@@ -206,7 +206,12 @@ export default function ChatWindow({
         )}
 
         {messages.map((msg, i) => (
-          <MessageBubble key={i} message={msg} />
+          <MessageBubble
+            key={i}
+            message={msg}
+            // The last message is the one being streamed when streaming=true
+            isStreaming={streaming && i === messages.length - 1}
+          />
         ))}
 
         {/* Streaming indicator — shown only while the assistant is responding */}
