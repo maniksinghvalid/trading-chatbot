@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     magic_link_base_url: str = "http://localhost:8000/auth/callback"
     frontend_base_url: str = "http://localhost:3000"
 
+    # Rate limiting + cost (slice 10 / RATE-01)
+    # ~50 turns/day single-user ceiling from cost table; 200 gives ample headroom
+    # for multiple users on a shared instance without runaway spend risk.
+    daily_request_budget: int = 200
+    # ~50 turns × ~2k input tokens/turn × 10 users = 1M/day; set 2M for headroom
+    daily_input_token_budget: int = 2_000_000
+    # Admin token for GET /admin/budgets — set ADMIN_TOKEN in the environment
+    admin_token: str = "change-me-in-production"
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

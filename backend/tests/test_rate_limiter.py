@@ -26,7 +26,7 @@ Coverage:
 from __future__ import annotations
 
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone  # noqa: F401 (date used in test)
 from unittest.mock import patch
 
 import pytest
@@ -144,7 +144,7 @@ def test_midnight_utc_reset(monkeypatch):
 
     # Use a fixed "yesterday" date to pre-populate the row
     yesterday = date(2026, 6, 8)
-    today = date(2026, 6, 9)
+    today_str = "2026-06-09"
 
     # Manually insert a row dated yesterday with request_count at the limit
     with Session(rl.engine) as db:
@@ -168,7 +168,7 @@ def test_midnight_utc_reset(monkeypatch):
     with Session(rl.engine) as db:
         row = db.get(UserBudget, user_id)
     assert row is not None
-    assert row.usage_date == today
+    assert row.usage_date == today_str
     assert row.request_count == 1
 
 
