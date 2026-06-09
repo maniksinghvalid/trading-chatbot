@@ -39,6 +39,7 @@ from sqlmodel import create_engine
 from sqlmodel import SQLModel
 
 from src.main import app
+from src.auth import issue_jwt
 from src.llm_client import LLMProviderError
 from src.session_store import history as get_history
 
@@ -163,17 +164,25 @@ def client(file_engine):
     return TestClient(app)
 
 
+@pytest.fixture
+def auth_headers() -> dict:
+    """Authorization headers with a test JWT for use in authenticated requests."""
+    token = issue_jwt("test@example.com")
+    return {"Authorization": f"Bearer {token}"}
+
+
 # ---------------------------------------------------------------------------
 # Event order tests
 # ---------------------------------------------------------------------------
 
-def test_stream_event_order(client, monkeypatch):
+def test_stream_event_order(client, auth_headers, monkeypatch):
     """SSE events must arrive in order: session -> citations -> token* -> done."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
     monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
 
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "bull case for AAPL", "ticker": "AAPL"},
     )
     assert resp.status_code == 200
@@ -200,13 +209,14 @@ def test_stream_event_order(client, monkeypatch):
     assert done_idx == len(event_names) - 1, "done must be the last event"
 
 
-def test_stream_citations_once_before_tokens(client, monkeypatch):
+def test_stream_citations_once_before_tokens(client, auth_headers, monkeypatch):
     """Citations must be emitted exactly ONCE, up front, before any token event."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
     monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
 
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "AAPL analysis", "ticker": "AAPL"},
     )
     events = _parse_sse_events(resp.content)
@@ -223,13 +233,14 @@ def test_stream_citations_once_before_tokens(client, monkeypatch):
     )
 
 
-def test_stream_tokens_carry_content(client, monkeypatch):
+def test_stream_tokens_carry_content(client, auth_headers, monkeypatch):
     """Token events carry the expected text payload from stream_complete."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
     monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
 
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "AAPL", "ticker": "AAPL"},
     )
     events = _parse_sse_events(resp.content)
@@ -243,13 +254,14 @@ def test_stream_tokens_carry_content(client, monkeypatch):
 # Turn persistence tests
 # ---------------------------------------------------------------------------
 
-def test_stream_both_turns_persisted(client, monkeypatch):
+def test_stream_both_turns_persisted(client, auth_headers, monkeypatch):
     """After stream completes, both user and assistant turns are in the session store."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
     monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
 
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "bull case for AAPL", "ticker": "AAPL", "session_id": "stream-persist-test"},
     )
     assert resp.status_code == 200
@@ -262,7 +274,7 @@ def test_stream_both_turns_persisted(client, monkeypatch):
     assert turns[1].content == "".join(_FAKE_TOKENS)
 
 
-def test_stream_assistant_text_is_full_concatenation(client, monkeypatch):
+def test_stream_assistant_text_is_full_concatenation(client, auth_headers, monkeypatch):
     """Persisted assistant turn content is the full concatenation of all tokens."""
     tokens = ["The ", "bull ", "case ", "is ", "strong."]
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
@@ -271,6 +283,7 @@ def test_stream_assistant_text_is_full_concatenation(client, monkeypatch):
     session_id = "concat-test-session"
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "any question", "ticker": "AAPL", "session_id": session_id},
     )
     assert resp.status_code == 200
@@ -281,7 +294,7 @@ def test_stream_assistant_text_is_full_concatenation(client, monkeypatch):
     assert assistant_turns[0].content == "The bull case is strong."
 
 
-def test_stream_turns_queryable_via_sessions_endpoint(client, monkeypatch):
+def test_stream_turns_queryable_via_sessions_endpoint(client, auth_headers, monkeypatch):
     """GET /sessions/{id} reflects turns persisted by the stream endpoint."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
     monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
@@ -289,11 +302,12 @@ def test_stream_turns_queryable_via_sessions_endpoint(client, monkeypatch):
     session_id = "sessions-check-test"
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "AAPL question", "ticker": "AAPL", "session_id": session_id},
     )
     assert resp.status_code == 200
 
-    detail = client.get(f"/sessions/{session_id}")
+    detail = client.get(f"/sessions/{session_id}", headers=auth_headers)
     assert detail.status_code == 200
     turns = detail.json()
     assert len(turns) == 2
@@ -305,12 +319,13 @@ def test_stream_turns_queryable_via_sessions_endpoint(client, monkeypatch):
 # No-data path tests
 # ---------------------------------------------------------------------------
 
-def test_stream_no_data_emits_graceful_token(client, monkeypatch):
+def test_stream_no_data_emits_graceful_token(client, auth_headers, monkeypatch):
     """Zero-chunk path emits session, citations (empty), graceful token, done — no tokens from LLM."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: [])
 
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "what about ZZZZ", "ticker": "ZZZZ"},
     )
     events = _parse_sse_events(resp.content)
@@ -331,13 +346,14 @@ def test_stream_no_data_emits_graceful_token(client, monkeypatch):
     assert "ZZZZ" in token_event["data"]
 
 
-def test_stream_no_data_turns_persisted(client, monkeypatch):
+def test_stream_no_data_turns_persisted(client, auth_headers, monkeypatch):
     """No-data path still persists both user and assistant turns."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: [])
 
     session_id = "no-data-stream-session"
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "anything about FAKEXYZ", "ticker": "FAKEXYZ", "session_id": session_id},
     )
     assert resp.status_code == 200
@@ -353,13 +369,14 @@ def test_stream_no_data_turns_persisted(client, monkeypatch):
 # Error handling tests (T-05-02)
 # ---------------------------------------------------------------------------
 
-def test_stream_llm_error_emits_error_event_then_done(client, monkeypatch):
+def test_stream_llm_error_emits_error_event_then_done(client, auth_headers, monkeypatch):
     """LLMProviderError mid-stream emits error event then done — no crash, no key leak."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
     monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_error_mock())
 
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "AAPL", "ticker": "AAPL"},
     )
     assert resp.status_code == 200
@@ -383,13 +400,14 @@ def test_stream_llm_error_emits_error_event_then_done(client, monkeypatch):
     assert "traceback" not in error_event["data"].lower()
 
 
-def test_stream_llm_error_emits_session_and_citations_before_error(client, monkeypatch):
+def test_stream_llm_error_emits_session_and_citations_before_error(client, auth_headers, monkeypatch):
     """Even on LLM error, session and citations events are emitted before error/done."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
     monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_error_mock())
 
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "AAPL", "ticker": "AAPL"},
     )
     events = _parse_sse_events(resp.content)
@@ -403,7 +421,7 @@ def test_stream_llm_error_emits_session_and_citations_before_error(client, monke
 # Session ID tests
 # ---------------------------------------------------------------------------
 
-def test_stream_session_id_passthrough(client, monkeypatch):
+def test_stream_session_id_passthrough(client, auth_headers, monkeypatch):
     """Supplied session_id is returned in the session event."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
     monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
@@ -411,6 +429,7 @@ def test_stream_session_id_passthrough(client, monkeypatch):
     supplied_id = "my-custom-session-id"
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "AAPL", "ticker": "AAPL", "session_id": supplied_id},
     )
     events = _parse_sse_events(resp.content)
@@ -418,13 +437,14 @@ def test_stream_session_id_passthrough(client, monkeypatch):
     assert session_event["data"] == supplied_id
 
 
-def test_stream_new_session_id_minted(client, monkeypatch):
+def test_stream_new_session_id_minted(client, auth_headers, monkeypatch):
     """When no session_id supplied, a UUID4 is minted and returned in session event."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
     monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
 
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "AAPL", "ticker": "AAPL"},
     )
     events = _parse_sse_events(resp.content)
@@ -439,13 +459,14 @@ def test_stream_new_session_id_minted(client, monkeypatch):
 # Citations content tests
 # ---------------------------------------------------------------------------
 
-def test_stream_citations_content(client, monkeypatch):
+def test_stream_citations_content(client, auth_headers, monkeypatch):
     """Citations event carries the expected Citation fields from chunk metadata."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
     monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
 
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "AAPL", "ticker": "AAPL"},
     )
     events = _parse_sse_events(resp.content)
@@ -473,7 +494,7 @@ _FAKE_QUOTE = {
 }
 
 
-def test_stream_price_question_emits_quote_event(client, monkeypatch):
+def test_stream_price_question_emits_quote_event(client, auth_headers, monkeypatch):
     """Price-intent stream emits event: quote after citations and before first token."""
     monkeypatch.setattr(
         "src.routes.chat.classify_intent",
@@ -486,6 +507,7 @@ def test_stream_price_question_emits_quote_event(client, monkeypatch):
 
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "what's AAPL trading at?", "ticker": "AAPL"},
     )
     assert resp.status_code == 200
@@ -504,7 +526,7 @@ def test_stream_price_question_emits_quote_event(client, monkeypatch):
     assert quote_idx < first_token_idx, "quote event must come before first token"
 
 
-def test_stream_price_question_quote_event_payload(client, monkeypatch):
+def test_stream_price_question_quote_event_payload(client, auth_headers, monkeypatch):
     """event: quote carries valid JSON with the five quote fields."""
     monkeypatch.setattr(
         "src.routes.chat.classify_intent",
@@ -517,6 +539,7 @@ def test_stream_price_question_quote_event_payload(client, monkeypatch):
 
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "what's AAPL trading at right now?", "ticker": "AAPL"},
     )
     events = _parse_sse_events(resp.content)
@@ -529,7 +552,7 @@ def test_stream_price_question_quote_event_payload(client, monkeypatch):
     assert payload["source"] == "yfinance"
 
 
-def test_stream_outlook_question_no_quote_event(client, monkeypatch):
+def test_stream_outlook_question_no_quote_event(client, auth_headers, monkeypatch):
     """Outlook/trajectory intent does NOT emit event: quote."""
     monkeypatch.setattr(
         "src.routes.chat.classify_intent",
@@ -549,6 +572,7 @@ def test_stream_outlook_question_no_quote_event(client, monkeypatch):
 
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "what's the outlook for AAPL?", "ticker": "AAPL"},
     )
     events = _parse_sse_events(resp.content)
@@ -562,7 +586,7 @@ def test_stream_outlook_question_no_quote_event(client, monkeypatch):
     )
 
 
-def test_stream_quote_unavailable_no_quote_event(client, monkeypatch):
+def test_stream_quote_unavailable_no_quote_event(client, auth_headers, monkeypatch):
     """When QuoteUnavailableError is raised, no event: quote is emitted and stream continues."""
     monkeypatch.setattr(
         "src.routes.chat.classify_intent",
@@ -579,6 +603,7 @@ def test_stream_quote_unavailable_no_quote_event(client, monkeypatch):
 
     resp = client.post(
         "/chat/stream",
+        headers=auth_headers,
         json={"message": "what's AAPL trading at?", "ticker": "AAPL"},
     )
     assert resp.status_code == 200

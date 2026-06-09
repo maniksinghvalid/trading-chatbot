@@ -32,6 +32,7 @@ import jwt as pyjwt
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session, create_engine
 
 import src.session_store as ss
@@ -48,14 +49,22 @@ from src.session_store import append_turn, list_sessions, history
 
 
 # ---------------------------------------------------------------------------
-# In-memory DB fixture (reused across Task 2 / Task 3 tests)
+# Shared in-memory DB fixture
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
 def in_memory_db(monkeypatch):
-    """Replace module-level engine with in-memory SQLite for each test."""
+    """Replace module-level engine with a StaticPool in-memory SQLite DB.
+
+    StaticPool ensures all threads and connections (including the TestClient's
+    ASGI worker threads) share the SAME in-memory SQLite database instance.
+    Without StaticPool, each new connection gets an empty :memory: DB with no
+    tables, causing 'no such table: turn' errors in integration tests.
+    """
     mem_engine = create_engine(
-        "sqlite:///:memory:", connect_args={"check_same_thread": False}
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
     )
     SQLModel.metadata.create_all(mem_engine)
     monkeypatch.setattr(ss, "engine", mem_engine)

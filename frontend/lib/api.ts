@@ -55,6 +55,18 @@ export function parseSSEBlock(block: string): StreamEvent | null {
 }
 
 /**
+ * Read the JWT from localStorage (set by the auth callback handler).
+ *
+ * Returns an empty string when localStorage is unavailable (SSR context)
+ * or when no token has been stored yet.  The caller adds the header only
+ * when a non-empty token is returned.
+ */
+function getStoredToken(): string {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem("access_token") ?? "";
+}
+
+/**
  * Async generator that streams chat responses from the backend /chat/stream endpoint.
  *
  * @param message  The user's question.
@@ -67,7 +79,8 @@ export function parseSSEBlock(block: string): StreamEvent | null {
  *   {event: "token", data: "<partial>"}  (repeated)
  *   {event: "done", data: ""}
  *
- * Throws on non-2xx HTTP responses.
+ * Throws on non-2xx HTTP responses (including 401 Unauthorized when no JWT
+ * is stored or the stored JWT has expired).
  */
 export async function* streamChat(
   message: string,
@@ -80,12 +93,20 @@ export async function* streamChat(
     ...(ticker ? { ticker } : {}),
   };
 
+  // Build request headers.  The Authorization header is added whenever a JWT
+  // is present in localStorage (stored by the auth callback handler on login).
+  const token = getStoredToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
   const response = await fetch(`${API_BASE}/chat/stream`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-    },
+    headers,
     body: JSON.stringify(body),
   });
 

@@ -19,11 +19,15 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.pool import StaticPool
+from sqlmodel import SQLModel, create_engine
 
 from src.main import app
+from src.auth import issue_jwt
 from src.llm_client import LLMProviderError
 import src.market_data as market_data
 from src.market_data import QuoteUnavailableError
+import src.session_store as ss
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -76,10 +80,34 @@ _FAKE_LLM_ANSWER = (
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def in_memory_db(monkeypatch):
+    """Replace module-level engine with a StaticPool in-memory SQLite DB.
+
+    Ensures TestClient ASGI threads share the same in-memory DB with no
+    cross-test state leakage.
+    """
+    mem_engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(mem_engine)
+    monkeypatch.setattr(ss, "engine", mem_engine)
+    yield mem_engine
+
+
 @pytest.fixture
 def client():
     """FastAPI TestClient using the real app instance."""
     return TestClient(app)
+
+
+@pytest.fixture
+def auth_headers() -> dict:
+    """Authorization headers with a test JWT for use in authenticated requests."""
+    token = issue_jwt("test@example.com")
+    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture(autouse=True)
@@ -105,12 +133,12 @@ def stub_extractor_and_classifier(monkeypatch):
 # Happy path tests
 # ---------------------------------------------------------------------------
 
-def test_post_chat_happy_path(client, monkeypatch):
+def test_post_chat_happy_path(client, auth_headers, monkeypatch):
     """POST /chat returns 200 with non-empty message, citations, and session_id."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
     monkeypatch.setattr("src.routes.chat.complete", lambda *a, **kw: _FAKE_LLM_ANSWER)
 
-    resp = client.post("/chat", json={"message": "bull case for AAPL", "ticker": "AAPL"})
+    resp = client.post("/chat", json={"message": "bull case for AAPL", "ticker": "AAPL"}, headers=auth_headers)
 
     assert resp.status_code == 200
     data = resp.json()
@@ -131,12 +159,12 @@ def test_post_chat_happy_path(client, monkeypatch):
     assert len(data["session_id"]) > 0
 
 
-def test_post_chat_citation_fields(client, monkeypatch):
+def test_post_chat_citation_fields(client, auth_headers, monkeypatch):
     """Citations are built from real chunk metadata with all required fields."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
     monkeypatch.setattr("src.routes.chat.complete", lambda *a, **kw: _FAKE_LLM_ANSWER)
 
-    resp = client.post("/chat", json={"message": "what is the signal for AAPL", "ticker": "AAPL"})
+    resp = client.post("/chat", json={"message": "what is the signal for AAPL", "ticker": "AAPL"}, headers=auth_headers)
     assert resp.status_code == 200
     data = resp.json()
 
@@ -147,7 +175,7 @@ def test_post_chat_citation_fields(client, monkeypatch):
         assert citation["report_type"] == "ANALYSIS"
 
 
-def test_post_chat_session_id_passthrough(client, monkeypatch):
+def test_post_chat_session_id_passthrough(client, auth_headers, monkeypatch):
     """A supplied session_id is echoed back unchanged."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
     monkeypatch.setattr("src.routes.chat.complete", lambda *a, **kw: _FAKE_LLM_ANSWER)
@@ -156,17 +184,18 @@ def test_post_chat_session_id_passthrough(client, monkeypatch):
     resp = client.post(
         "/chat",
         json={"message": "tell me about AAPL", "ticker": "AAPL", "session_id": supplied_id},
+        headers=auth_headers,
     )
     assert resp.status_code == 200
     assert resp.json()["session_id"] == supplied_id
 
 
-def test_post_chat_new_session_id_minted(client, monkeypatch):
+def test_post_chat_new_session_id_minted(client, auth_headers, monkeypatch):
     """When no session_id is supplied, a new uuid4 is minted."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
     monkeypatch.setattr("src.routes.chat.complete", lambda *a, **kw: _FAKE_LLM_ANSWER)
 
-    resp = client.post("/chat", json={"message": "AAPL fundamentals", "ticker": "AAPL"})
+    resp = client.post("/chat", json={"message": "AAPL fundamentals", "ticker": "AAPL"}, headers=auth_headers)
     assert resp.status_code == 200
     sid = resp.json()["session_id"]
     # UUID4 is 36 chars (8-4-4-4-12 with hyphens)
@@ -178,12 +207,12 @@ def test_post_chat_new_session_id_minted(client, monkeypatch):
 # No-data path tests (VERIFY-NODATA)
 # ---------------------------------------------------------------------------
 
-def test_post_chat_no_data_unknown_ticker(client, monkeypatch):
+def test_post_chat_no_data_unknown_ticker(client, auth_headers, monkeypatch):
     """Unknown ticker with zero chunks returns graceful message + empty citations."""
     # retrieve returns no chunks for an unknown ticker
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: [])
 
-    resp = client.post("/chat", json={"message": "what do you know about ZZZZ", "ticker": "ZZZZ"})
+    resp = client.post("/chat", json={"message": "what do you know about ZZZZ", "ticker": "ZZZZ"}, headers=auth_headers)
     assert resp.status_code == 200
 
     data = resp.json()
@@ -203,11 +232,11 @@ def test_post_chat_no_data_unknown_ticker(client, monkeypatch):
     assert len(data["session_id"]) > 0
 
 
-def test_post_chat_no_data_message_wording(client, monkeypatch):
+def test_post_chat_no_data_message_wording(client, auth_headers, monkeypatch):
     """No-data response contains the expected graceful wording."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: [])
 
-    resp = client.post("/chat", json={"message": "anything", "ticker": "FAKEXYZ"})
+    resp = client.post("/chat", json={"message": "anything", "ticker": "FAKEXYZ"}, headers=auth_headers)
     assert resp.status_code == 200
 
     message = resp.json()["message"]
@@ -217,22 +246,22 @@ def test_post_chat_no_data_message_wording(client, monkeypatch):
     assert "live market data" in message.lower()
 
 
-def test_post_chat_no_data_no_fabricated_citation(client, monkeypatch):
+def test_post_chat_no_data_no_fabricated_citation(client, auth_headers, monkeypatch):
     """No-data path NEVER includes fabricated citations (T-03-02)."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: [])
 
-    resp = client.post("/chat", json={"message": "bull case", "ticker": "NODATA"})
+    resp = client.post("/chat", json={"message": "bull case", "ticker": "NODATA"}, headers=auth_headers)
     assert resp.status_code == 200
 
     # citations field must be an empty list
     assert resp.json()["citations"] == []
 
 
-def test_post_chat_no_data_no_ticker_supplied(client, monkeypatch):
+def test_post_chat_no_data_no_ticker_supplied(client, auth_headers, monkeypatch):
     """When no ticker is supplied and retrieve returns [], graceful no-data response."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: [])
 
-    resp = client.post("/chat", json={"message": "what stocks should I buy"})
+    resp = client.post("/chat", json={"message": "what stocks should I buy"}, headers=auth_headers)
     assert resp.status_code == 200
 
     data = resp.json()
@@ -245,7 +274,7 @@ def test_post_chat_no_data_no_ticker_supplied(client, monkeypatch):
 # Error path tests
 # ---------------------------------------------------------------------------
 
-def test_post_chat_llm_error_returns_503(client, monkeypatch):
+def test_post_chat_llm_error_returns_503(client, auth_headers, monkeypatch):
     """LLMProviderError from complete() is translated to HTTP 503."""
     monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
     monkeypatch.setattr(
@@ -253,20 +282,20 @@ def test_post_chat_llm_error_returns_503(client, monkeypatch):
         lambda *a, **kw: (_ for _ in ()).throw(LLMProviderError("LLM provider unavailable")),
     )
 
-    resp = client.post("/chat", json={"message": "AAPL", "ticker": "AAPL"})
+    resp = client.post("/chat", json={"message": "AAPL", "ticker": "AAPL"}, headers=auth_headers)
     assert resp.status_code == 503
     # Generic body — no key or stack trace
     assert "unavailable" in resp.json()["detail"].lower()
 
 
-def test_post_chat_pinecone_error_returns_graceful(client, monkeypatch):
+def test_post_chat_pinecone_error_returns_graceful(client, auth_headers, monkeypatch):
     """Pinecone retrieval failure degrades gracefully (no-data response)."""
     def _failing_retrieve(*a, **kw):
         raise RuntimeError("connection timeout")
 
     monkeypatch.setattr("src.routes.chat.retrieve", _failing_retrieve)
 
-    resp = client.post("/chat", json={"message": "anything", "ticker": "AAPL"})
+    resp = client.post("/chat", json={"message": "anything", "ticker": "AAPL"}, headers=auth_headers)
     assert resp.status_code == 200
     data = resp.json()
     # Treated as no-data: empty citations
@@ -279,7 +308,7 @@ def test_post_chat_pinecone_error_returns_graceful(client, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_post_chat_auto_ticker_from_message(client, monkeypatch):
+def test_post_chat_auto_ticker_from_message(client, auth_headers, monkeypatch):
     """TICK-01: 'how is apple doing' (no req.ticker) resolves AAPL via extract_tickers.
 
     The mocked extract_tickers returns ["AAPL"], so the route uses that as the
@@ -300,7 +329,7 @@ def test_post_chat_auto_ticker_from_message(client, monkeypatch):
     monkeypatch.setattr("src.routes.chat.retrieve", _capturing_retrieve)
     monkeypatch.setattr("src.routes.chat.complete", lambda *a, **kw: _FAKE_LLM_ANSWER)
 
-    resp = client.post("/chat", json={"message": "how is apple doing"})
+    resp = client.post("/chat", json={"message": "how is apple doing"}, headers=auth_headers)
     assert resp.status_code == 200
 
     assert len(retrieve_calls) == 1, "retrieve must be called exactly once"
@@ -309,7 +338,7 @@ def test_post_chat_auto_ticker_from_message(client, monkeypatch):
     )
 
 
-def test_post_chat_explicit_ticker_wins_over_extraction(client, monkeypatch):
+def test_post_chat_explicit_ticker_wins_over_extraction(client, auth_headers, monkeypatch):
     """Explicit req.ticker takes precedence over extracted tickers (TICK-01)."""
     retrieve_calls: list[dict] = []
 
@@ -325,7 +354,7 @@ def test_post_chat_explicit_ticker_wins_over_extraction(client, monkeypatch):
     monkeypatch.setattr("src.routes.chat.retrieve", _capturing_retrieve)
     monkeypatch.setattr("src.routes.chat.complete", lambda *a, **kw: _FAKE_LLM_ANSWER)
 
-    resp = client.post("/chat", json={"message": "tell me about it", "ticker": "AAPL"})
+    resp = client.post("/chat", json={"message": "tell me about it", "ticker": "AAPL"}, headers=auth_headers)
     assert resp.status_code == 200
     assert retrieve_calls[0]["ticker"] == "AAPL"
 
@@ -343,7 +372,7 @@ _FAKE_QUOTE = {
 }
 
 
-def test_post_chat_price_question_calls_quote(client, monkeypatch):
+def test_post_chat_price_question_calls_quote(client, auth_headers, monkeypatch):
     """POST /chat with 'trading at' intent calls market_data.quote(ticker)."""
     quote_calls: list[str] = []
 
@@ -360,7 +389,7 @@ def test_post_chat_price_question_calls_quote(client, monkeypatch):
     monkeypatch.setattr("src.routes.chat.complete", lambda *a, **kw: _FAKE_LLM_ANSWER)
     monkeypatch.setattr(market_data, "quote", _capturing_quote)
 
-    resp = client.post("/chat", json={"message": "what's AAPL trading at?", "ticker": "AAPL"})
+    resp = client.post("/chat", json={"message": "what's AAPL trading at?", "ticker": "AAPL"}, headers=auth_headers)
     assert resp.status_code == 200
 
     assert len(quote_calls) == 1, (
@@ -369,7 +398,7 @@ def test_post_chat_price_question_calls_quote(client, monkeypatch):
     assert quote_calls[0] == "AAPL"
 
 
-def test_post_chat_price_question_prompt_contains_live_quote(client, monkeypatch):
+def test_post_chat_price_question_prompt_contains_live_quote(client, auth_headers, monkeypatch):
     """POST /chat with price intent renders '## Live Quote' in the LLM prompt."""
     captured_messages: list[list] = []
 
@@ -387,7 +416,7 @@ def test_post_chat_price_question_prompt_contains_live_quote(client, monkeypatch
     monkeypatch.setattr(market_data, "quote", lambda ticker: _FAKE_QUOTE)
 
     resp = client.post(
-        "/chat", json={"message": "what's AAPL trading at right now?", "ticker": "AAPL"}
+        "/chat", json={"message": "what's AAPL trading at right now?", "ticker": "AAPL"}, headers=auth_headers
     )
     assert resp.status_code == 200
 
@@ -398,7 +427,7 @@ def test_post_chat_price_question_prompt_contains_live_quote(client, monkeypatch
     )
 
 
-def test_post_chat_outlook_question_does_not_call_quote(client, monkeypatch):
+def test_post_chat_outlook_question_does_not_call_quote(client, auth_headers, monkeypatch):
     """POST /chat with 'what's the outlook for AAPL?' does NOT call market_data.quote()."""
     quote_calls: list[str] = []
 
@@ -416,7 +445,7 @@ def test_post_chat_outlook_question_does_not_call_quote(client, monkeypatch):
     monkeypatch.setattr(market_data, "quote", _tracking_quote)
 
     resp = client.post(
-        "/chat", json={"message": "what's the outlook for AAPL?", "ticker": "AAPL"}
+        "/chat", json={"message": "what's the outlook for AAPL?", "ticker": "AAPL"}, headers=auth_headers
     )
     assert resp.status_code == 200
 
@@ -425,7 +454,7 @@ def test_post_chat_outlook_question_does_not_call_quote(client, monkeypatch):
     )
 
 
-def test_post_chat_quote_unavailable_degrades_gracefully(client, monkeypatch):
+def test_post_chat_quote_unavailable_degrades_gracefully(client, auth_headers, monkeypatch):
     """QuoteUnavailableError from market_data.quote() does not fail the chat response."""
     def _failing_quote(ticker: str) -> dict:
         raise QuoteUnavailableError("provider down")
@@ -440,7 +469,7 @@ def test_post_chat_quote_unavailable_degrades_gracefully(client, monkeypatch):
     monkeypatch.setattr(market_data, "quote", _failing_quote)
 
     resp = client.post(
-        "/chat", json={"message": "what's AAPL trading at?", "ticker": "AAPL"}
+        "/chat", json={"message": "what's AAPL trading at?", "ticker": "AAPL"}, headers=auth_headers
     )
     # Chat must succeed even when quote provider is down
     assert resp.status_code == 200

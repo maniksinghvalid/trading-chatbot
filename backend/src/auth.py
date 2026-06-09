@@ -39,7 +39,7 @@ import time
 from typing import Optional
 
 import jwt as pyjwt
-from fastapi import HTTPException
+from fastapi import Header, HTTPException
 
 from src.config import settings
 
@@ -151,21 +151,26 @@ def verify_magic_token(token: str) -> str:
 
 
 def get_current_user(
-    authorization: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None),
 ) -> str:
     """FastAPI dependency: extract and validate the Bearer JWT, return user_id.
 
-    Reads the Authorization header, strips the "Bearer " prefix, calls
-    decode_jwt(), and returns the "sub" claim (the user's email / user_id).
+    Reads the Authorization header (injected by FastAPI's Header() mechanism),
+    strips the "Bearer " prefix, calls decode_jwt(), and returns the "sub"
+    claim (the user's email / user_id).
 
     Usage in route handlers:
         @router.post("/chat")
         def post_chat(req: ChatRequest, user_id: str = Depends(get_current_user)):
             ...
 
+    Tests can call this directly by passing the authorization string:
+        get_current_user(authorization="Bearer <token>")
+        get_current_user(authorization=None)  # → raises 401
+
     Args:
-        authorization: The raw Authorization header value (injected by FastAPI
-                       via Header(None) in the route parameter annotation).
+        authorization: The raw Authorization header value (injected by FastAPI's
+                       Header() mechanism from the HTTP request headers).
 
     Returns:
         The user_id string (email) from the validated JWT.

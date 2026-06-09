@@ -52,9 +52,10 @@ import logging
 import uuid
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
+from src.auth import get_current_user
 from src.intent_classifier import classify_intent
 from src.llm_client import LLMProviderError, complete, stream_complete
 import src.market_data as market_data
@@ -97,8 +98,14 @@ def _wants_live_quote(intent: str, message: str, ticker: str | None) -> bool:
 
 
 @router.post("/chat", response_model=ChatResponse)
-def post_chat(req: ChatRequest) -> ChatResponse:
+def post_chat(
+    req: ChatRequest,
+    user_id: str = Depends(get_current_user),
+) -> ChatResponse:
     """Non-streaming RAG chat endpoint with conversation history.
+
+    Requires a valid Bearer JWT in the Authorization header (AUTH-01).
+    Unauthenticated requests receive HTTP 401.
 
     Loads prior turns from the session store so the LLM has multi-turn context.
     Coreference: if req.ticker is None, the most recent non-null ticker_scope
@@ -153,8 +160,8 @@ def post_chat(req: ChatRequest) -> ChatResponse:
             "would you like live market data instead?"
         )
         # Still persist the user turn so the session is meaningful for history
-        append_turn(session_id, "user", req.message, ticker=req.ticker)
-        append_turn(session_id, "assistant", graceful_message, ticker=ticker_upper)
+        append_turn(session_id, "user", req.message, ticker=req.ticker, user_id=user_id)
+        append_turn(session_id, "assistant", graceful_message, ticker=ticker_upper, user_id=user_id)
         return ChatResponse(
             message=graceful_message,
             citations=[],
@@ -213,8 +220,8 @@ def post_chat(req: ChatRequest) -> ChatResponse:
             )
 
     # --- Step 6: Persist both turns and return ChatResponse ---
-    append_turn(session_id, "user", req.message, ticker=req.ticker)
-    append_turn(session_id, "assistant", answer, ticker=ticker_upper)
+    append_turn(session_id, "user", req.message, ticker=req.ticker, user_id=user_id)
+    append_turn(session_id, "assistant", answer, ticker=ticker_upper, user_id=user_id)
 
     return ChatResponse(
         message=answer,
@@ -224,8 +231,14 @@ def post_chat(req: ChatRequest) -> ChatResponse:
 
 
 @router.post("/chat/stream")
-def post_chat_stream(req: ChatRequest) -> EventSourceResponse:
+def post_chat_stream(
+    req: ChatRequest,
+    user_id: str = Depends(get_current_user),
+) -> EventSourceResponse:
     """Streaming SSE RAG chat endpoint (slice 4).
+
+    Requires a valid Bearer JWT in the Authorization header (AUTH-01).
+    Unauthenticated requests receive HTTP 401.
 
     Emits SSE events in the locked order (01-CONTEXT.md):
       1. event: session   — the session_id (minted or supplied)
@@ -311,8 +324,8 @@ def post_chat_stream(req: ChatRequest) -> EventSourceResponse:
                 "would you like live market data instead?"
             )
             yield {"event": "token", "data": graceful_message}
-            append_turn(session_id, "user", req.message, ticker=req.ticker)
-            append_turn(session_id, "assistant", graceful_message, ticker=ticker_upper)
+            append_turn(session_id, "user", req.message, ticker=req.ticker, user_id=user_id)
+            append_turn(session_id, "assistant", graceful_message, ticker=ticker_upper, user_id=user_id)
             yield {"event": "done", "data": ""}
             return
 
@@ -357,8 +370,8 @@ def post_chat_stream(req: ChatRequest) -> EventSourceResponse:
 
         # --- Step 5: Persist both turns on completion ---
         assistant_text = "".join(full_response_parts)
-        append_turn(session_id, "user", req.message, ticker=req.ticker)
-        append_turn(session_id, "assistant", assistant_text, ticker=ticker_upper)
+        append_turn(session_id, "user", req.message, ticker=req.ticker, user_id=user_id)
+        append_turn(session_id, "assistant", assistant_text, ticker=ticker_upper, user_id=user_id)
 
         yield {"event": "done", "data": ""}
 
