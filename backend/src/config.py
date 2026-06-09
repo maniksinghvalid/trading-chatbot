@@ -24,6 +24,15 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: list[str] = ["http://localhost:3000"]
 
+    # Auth — magic-link + JWT (slice 8 / AUTH-01)
+    # jwt_secret: used for HS256 signing of both magic-link tokens and session JWTs.
+    # Set JWT_SECRET in the environment (already pre-set by the orchestrator).
+    jwt_secret: str = ""
+    jwt_ttl_hours: int = 24
+    email_provider_api_key: str = ""  # Resend API key (set EMAIL_PROVIDER_API_KEY)
+    magic_link_base_url: str = "http://localhost:8000/auth/callback"
+    frontend_base_url: str = "http://localhost:3000"
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
