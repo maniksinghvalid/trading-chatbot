@@ -153,15 +153,16 @@ def test_turn_has_created_at():
 # ---------------------------------------------------------------------------
 
 def test_list_sessions_groups_by_session_id():
-    """list_sessions returns one entry per session_id."""
+    """list_sessions returns one entry per session_id for the given user."""
     sid_a = str(uuid.uuid4())
     sid_b = str(uuid.uuid4())
+    user = "test@example.com"
 
-    append_turn(sid_a, "user", "bull case for AAPL", ticker="AAPL")
-    append_turn(sid_a, "assistant", "Here is the bull case...", ticker="AAPL")
-    append_turn(sid_b, "user", "TSLA risks", ticker="TSLA")
+    append_turn(sid_a, "user", "bull case for AAPL", ticker="AAPL", user_id=user)
+    append_turn(sid_a, "assistant", "Here is the bull case...", ticker="AAPL", user_id=user)
+    append_turn(sid_b, "user", "TSLA risks", ticker="TSLA", user_id=user)
 
-    sessions = list_sessions()
+    sessions = list_sessions(user)
     session_ids = {s["session_id"] for s in sessions}
     assert sid_a in session_ids
     assert sid_b in session_ids
@@ -171,27 +172,29 @@ def test_list_sessions_groups_by_session_id():
 def test_list_sessions_title_is_first_user_message():
     """list_sessions uses the first user message as the session title."""
     sid = str(uuid.uuid4())
-    append_turn(sid, "user", "bull case for AAPL", ticker="AAPL")
-    append_turn(sid, "assistant", "AAPL looks strong...", ticker="AAPL")
-    append_turn(sid, "user", "what about risks?", ticker=None)
+    user = "test@example.com"
+    append_turn(sid, "user", "bull case for AAPL", ticker="AAPL", user_id=user)
+    append_turn(sid, "assistant", "AAPL looks strong...", ticker="AAPL", user_id=user)
+    append_turn(sid, "user", "what about risks?", ticker=None, user_id=user)
 
-    sessions = list_sessions()
+    sessions = list_sessions(user)
     assert len(sessions) == 1
     assert sessions[0]["title"] == "bull case for AAPL"
 
 
 def test_list_sessions_empty():
     """list_sessions returns an empty list when no sessions exist."""
-    sessions = list_sessions()
+    sessions = list_sessions("test@example.com")
     assert sessions == []
 
 
 def test_list_sessions_each_entry_has_required_keys():
     """Each entry returned by list_sessions has session_id and title fields."""
     sid = str(uuid.uuid4())
-    append_turn(sid, "user", "AAPL analysis", ticker="AAPL")
+    user = "test@example.com"
+    append_turn(sid, "user", "AAPL analysis", ticker="AAPL", user_id=user)
 
-    sessions = list_sessions()
+    sessions = list_sessions(user)
     assert len(sessions) == 1
     entry = sessions[0]
     assert "session_id" in entry
