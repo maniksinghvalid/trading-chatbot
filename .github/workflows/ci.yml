@@ -1,0 +1,103 @@
+# ci.yml — Continuous Integration for trading-chatbot
+#
+# Runs on every push and pull_request.
+#
+# Jobs:
+#   backend  — Python 3.12 + uv; runs the full pytest suite including the
+#              VERIFY-SCHEMA schema-regression test (test_schema_contract.py).
+#              The schema test requires a live Pinecone index; it is wired with
+#              PINECONE_READ_KEY from repo secrets so drift fails loudly.
+#              If PINECONE_READ_KEY is not set (missing secret), the test auto-
+#              skips via conftest.py (degraded CI — set the secret to enforce
+#              the VERIFY-SCHEMA contract on every commit).
+#
+#   frontend — Node 20; npm ci + next build + next lint.
+#
+# Required repo secrets (Settings → Secrets → Actions):
+#   PINECONE_READ_KEY   — Pinecone reader API key (enables VERIFY-SCHEMA)
+#
+# Optional repo secrets (needed for magic-link auth in integration tests):
+#   OPENAI_API_KEY      — OpenAI key (used if live LLM tests are added)
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Backend — FastAPI + pytest (incl. VERIFY-SCHEMA schema-regression test)
+  # --------------------------------------------------------------------------
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.6.x"
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Run pytest (incl. VERIFY-SCHEMA schema-regression test)
+        env:
+          # Supplying PINECONE_READ_KEY causes conftest.py to let the live_index
+          # tests run, executing the VERIFY-SCHEMA contract assertions on every
+          # commit.  If the secret is absent, the schema test auto-skips (the
+          # build still passes, but schema drift will not be caught until the
+          # secret is restored — set it to enforce VERIFY-SCHEMA).
+          PINECONE_READ_KEY: ${{ secrets.PINECONE_READ_KEY }}
+          # DATABASE_URL is not set here, so Postgres integration tests auto-skip
+          # (mirrors the local dev pattern in conftest.py).
+        run: uv run pytest -v
+
+  # --------------------------------------------------------------------------
+  # Frontend — Next.js build + lint
+  # --------------------------------------------------------------------------
+  frontend:
+    name: Frontend build + lint
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        env:
+          # Provide a placeholder so the build does not fail on missing env.
+          # The real value is set on the deploy platform.
+          NEXT_PUBLIC_API_BASE: http://localhost:8000
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint
