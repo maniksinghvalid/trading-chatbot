@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     email_provider_api_key: str = ""  # Resend API key (set EMAIL_PROVIDER_API_KEY)
     magic_link_base_url: str = "http://localhost:8000/auth/callback"
     frontend_base_url: str = "http://localhost:3000"
+    # Magic-link email sender. MUST be a Resend-verified domain in production.
+    # Default is Resend's shared test sender, which delivers ONLY to the Resend
+    # account owner's own email — fine for local/dev. Set MAGIC_LINK_FROM_EMAIL
+    # to "Name <noreply@your-verified-domain>" once your domain shows Verified.
+    magic_link_from_email: str = "Trading Chatbot <onboarding@resend.dev>"
 
     # Rate limiting + cost (slice 10 / RATE-01)
     # ~50 turns/day single-user ceiling from cost table; 200 gives ample headroom

@@ -78,7 +78,7 @@ def _send_magic_link_email(email: str, link: str) -> None:
     try:
         resend.Emails.send(
             {
-                "from": "Trading Chatbot <noreply@updates.maniksingh.dev>",
+                "from": settings.magic_link_from_email,
                 "to": [email],
                 "subject": "Your Trading Chatbot login link",
                 "html": (
