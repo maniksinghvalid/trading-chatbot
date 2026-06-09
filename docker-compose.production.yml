@@ -1,0 +1,116 @@
+# docker-compose.production.yml — self-hosted production stack for trading-chatbot
+#
+# Services:
+#   db       — Postgres 16 (persistent volume)
+#   backend  — FastAPI / uvicorn image built from backend/Dockerfile
+#   frontend — Next.js image built from frontend/Dockerfile
+#
+# IMPORTANT: All secrets are injected via environment variables.
+# DO NOT hardcode any secret values in this file or in any Dockerfile.
+# Set secrets via:
+#   export PINECONE_READ_KEY=...
+#   export OPENAI_API_KEY=...
+#   docker compose -f docker-compose.production.yml up -d
+#
+# Or use a .env file (NOT committed to git — add .env to .gitignore).
+#
+# Usage:
+#   docker compose -f docker-compose.production.yml up -d   # start all services
+#   docker compose -f docker-compose.production.yml down    # stop
+#   docker compose -f docker-compose.production.yml down -v # full reset (removes DB volume)
+
+services:
+
+  # ------------------------------------------------------------------
+  # Postgres 16 — persistent relational store for sessions + budgets
+  # ------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: trading-chatbot-db-prod
+    environment:
+      POSTGRES_DB: chatbot
+      POSTGRES_USER: chatbot
+      # Set POSTGRES_PASSWORD via env or .env file — never hardcode
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata-prod:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatbot -d chatbot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    # DB should NOT be publicly exposed in production
+    # ports: ["5432:5432"]  # remove this line — access via internal network only
+
+  # ------------------------------------------------------------------
+  # Backend — FastAPI / uvicorn
+  # ------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: trading-chatbot-backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Database — uses the internal compose network hostname
+      DATABASE_URL: postgresql+psycopg://chatbot:${POSTGRES_PASSWORD}@db:5432/chatbot
+
+      # Pinecone — READ key only (consumer contract)
+      PINECONE_READ_KEY: ${PINECONE_READ_KEY}
+      PINECONE_HOST: ${PINECONE_HOST}
+
+      # OpenAI
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+      # JWT auth
+      JWT_SECRET: ${JWT_SECRET}
+
+      # Magic-link email (Resend)
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      MAGIC_LINK_FROM_EMAIL: ${MAGIC_LINK_FROM_EMAIL:-noreply@example.com}
+      BACKEND_URL: ${BACKEND_URL}
+
+      # CORS — allow the deployed frontend origin
+      CORS_ORIGINS: ${CORS_ORIGINS}
+
+      # Uvicorn port (platform may inject PORT)
+      PORT: ${PORT:-8000}
+    ports:
+      - "${BACKEND_PORT:-8000}:${PORT:-8000}"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:${PORT:-8000}/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ------------------------------------------------------------------
+  # Frontend — Next.js production build
+  # ------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Set to the public URL of the deployed backend (HTTPS in production)
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE}
+    container_name: trading-chatbot-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      # Runtime override (supplements build-arg)
+      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE}
+      NODE_ENV: production
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    restart: unless-stopped
+
+volumes:
+  pgdata-prod:
+    driver: local

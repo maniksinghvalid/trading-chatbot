@@ -1,0 +1,36 @@
+# frontend/.dockerignore — files excluded from the Docker build context
+
+# Node modules (Docker uses its own install)
+node_modules/
+
+# Next.js cache (rebuilt in Docker)
+.next/
+out/
+
+# Environment / secrets
+.env
+.env.*
+*.key
+
+# Testing
+__tests__/
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+vitest.config.ts
+coverage/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# TypeScript build cache
+tsconfig.tsbuildinfo

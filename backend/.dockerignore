@@ -1,0 +1,43 @@
+# backend/.dockerignore — files excluded from the Docker build context
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Virtual environments (Docker uses its own venv)
+.venv/
+venv/
+env/
+
+# Local dev databases — never ship to image
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment / secrets — never in the image
+.env
+.env.*
+*.key
+
+# Tests — runtime image doesn't need them
+tests/
+pytest.ini
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# uv cache
+.uv/
+uv-build/
