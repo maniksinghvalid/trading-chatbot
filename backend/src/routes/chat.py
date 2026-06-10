@@ -98,6 +98,51 @@ def _wants_live_quote(intent: str, message: str, ticker: str | None) -> bool:
     return any(kw in msg_lower for kw in _PRICE_KEYWORDS)
 
 
+# Affirmative replies that, following a no-data "live market data?" offer, mean
+# "yes, fetch the live quote" (slice 7 follow-up — closes the no-data → quote loop).
+_AFFIRMATIVES: frozenset[str] = frozenset(
+    {
+        "yes", "y", "yeah", "yep", "yup", "sure", "ok", "okay", "k",
+        "yes please", "please", "please do", "go ahead", "yes go ahead",
+        "do it", "sounds good", "go for it",
+    }
+)
+
+
+def _is_affirmative(message: str) -> bool:
+    """True when the message is a short affirmative ("yes", "go ahead", ...)."""
+    norm = "".join(c for c in message.lower() if c.isalnum() or c.isspace()).strip()
+    if not norm:
+        return False
+    if norm in _AFFIRMATIVES:
+        return True
+    return norm.startswith(("yes", "sure", "ok", "okay", "yeah", "yep", "yup")) or "go ahead" in norm
+
+
+def _prev_offered_live_data(prior_turns) -> bool:
+    """True when the most recent assistant turn offered live market data."""
+    for t in reversed(prior_turns):
+        if t.role == "assistant":
+            return "live market data" in (t.content or "").lower()
+    return False
+
+
+def _format_quote_message(ticker: str, q: dict) -> str:
+    """Deterministic, disclaimer-bearing summary of a live quote dict."""
+    def _fnum(x, fmt: str) -> str:
+        try:
+            return format(x, fmt)
+        except (TypeError, ValueError):
+            return str(x)
+
+    return (
+        f"Latest market data for {ticker} (delayed ~15 min): "
+        f"${_fnum(q.get('price'), '.2f')}, {_fnum(q.get('day_change_pct'), '+.2f')}% today, "
+        f"volume {_fnum(q.get('volume'), ',')} (source: {q.get('source', 'yfinance')}). "
+        "This is live price data, not stored analysis — educational use only, not financial advice."
+    )
+
+
 @router.post("/chat", response_model=ChatResponse)
 def post_chat(
     req: ChatRequest,
@@ -166,6 +211,20 @@ def post_chat(
 
     # --- No-data path (VERIFY-NODATA) ---
     if not chunks:
+        # Affirmative follow-up to a prior "live market data?" offer → fetch a quote
+        # instead of looping the same no-data message.
+        if ticker_upper and _is_affirmative(req.message) and _prev_offered_live_data(prior_turns):
+            append_turn(session_id, "user", req.message, ticker=req.ticker, user_id=user_id)
+            try:
+                msg = _format_quote_message(ticker_upper, market_data.quote(ticker_upper))
+            except QuoteUnavailableError:
+                msg = (
+                    f"Live market data for {ticker_upper} is unavailable right now. "
+                    "Please try again shortly. (Educational use only — not financial advice.)"
+                )
+            append_turn(session_id, "assistant", msg, ticker=ticker_upper, user_id=user_id)
+            return ChatResponse(message=msg, citations=[], session_id=session_id)
+
         ticker_label = ticker_upper or "the requested ticker"
         graceful_message = (
             f"I don't have stored analysis for {ticker_label}; "
@@ -335,6 +394,24 @@ def post_chat_stream(
 
         # --- No-data path: graceful message as a single token, then done ---
         if not chunks:
+            # Affirmative follow-up to a prior "live market data?" offer → fetch a
+            # quote (emit a quote event so the QuoteCard renders) instead of looping.
+            if ticker_upper and _is_affirmative(req.message) and _prev_offered_live_data(prior_turns):
+                append_turn(session_id, "user", req.message, ticker=req.ticker, user_id=user_id)
+                try:
+                    q = market_data.quote(ticker_upper)
+                    yield {"event": "quote", "data": json.dumps(q)}
+                    msg = _format_quote_message(ticker_upper, q)
+                except QuoteUnavailableError:
+                    msg = (
+                        f"Live market data for {ticker_upper} is unavailable right now. "
+                        "Please try again shortly. (Educational use only — not financial advice.)"
+                    )
+                yield {"event": "token", "data": msg}
+                append_turn(session_id, "assistant", msg, ticker=ticker_upper, user_id=user_id)
+                yield {"event": "done", "data": ""}
+                return
+
             ticker_label = ticker_upper or "the requested ticker"
             graceful_message = (
                 f"I don't have stored analysis for {ticker_label}; "
