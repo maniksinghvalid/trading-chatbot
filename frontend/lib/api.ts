@@ -38,20 +38,27 @@ export function parseSSEBlock(block: string): StreamEvent | null {
   // payloads carry no \r and JSON.parse of the citations payload succeeds.
   const lines = block.split(/\r?\n/);
   let event = "message";
-  let data = "";
+  const dataLines: string[] = [];
 
   for (const line of lines) {
     if (line.startsWith("event:")) {
       // Strip "event:" prefix and exactly one leading space (if present)
       event = line.slice(6).replace(/^ /, "");
     } else if (line.startsWith("data:")) {
-      // Strip "data:" prefix and exactly one leading space (if present)
-      data = line.slice(5).replace(/^ /, "");
+      // Strip "data:" prefix and exactly one leading space (if present).
+      // Per the SSE spec, a single event's data field that contains newlines is
+      // transmitted as MULTIPLE consecutive `data:` lines; the client MUST rejoin
+      // them with "\n". Keeping only the last line (the previous bug) silently
+      // dropped every newline inside a token, collapsing all Markdown structure
+      // (headings, lists, blank lines) onto one line.
+      dataLines.push(line.slice(5).replace(/^ /, ""));
     }
     // Ignore comment lines (starting with ':') and id:/retry: lines
   }
 
-  if (!event && data === "") return null;
+  const data = dataLines.join("\n");
+
+  if (!event && dataLines.length === 0) return null;
 
   return { event, data };
 }

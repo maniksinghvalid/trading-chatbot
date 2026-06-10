@@ -86,4 +86,21 @@ describe("SSE CRLF wire parsing", () => {
     expect(ev).toEqual({ event: "citations", data: '[{"ticker":"MARA"}]' });
     expect(() => JSON.parse(ev!.data)).not.toThrow();
   });
+
+  it("Test E — multiple data: lines in one event rejoin with \\n (SSE multiline)", () => {
+    // sse-starlette serialises a data field containing "\n\n## Heading" as three
+    // consecutive `data:` lines. The parser MUST rejoin them with "\n" — otherwise
+    // every newline inside a token is dropped and Markdown collapses to one line.
+    const block = "event: token\r\ndata: \r\ndata: \r\ndata: ## Heading";
+    const ev = parseSSEBlock(block);
+    expect(ev).toEqual({ event: "token", data: "\n\n## Heading" });
+  });
+
+  it("Test F — streamChat preserves newlines across a multi-line token event", async () => {
+    const wire =
+      "event: token\r\ndata: - one\r\ndata: - two\r\n\r\n" +
+      "event: done\r\ndata: \r\n\r\n";
+    const events = await collect([wire]);
+    expect(events[0]).toEqual({ event: "token", data: "- one\n- two" });
+  });
 });
