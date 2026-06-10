@@ -21,6 +21,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import TickerChip from "./TickerChip";
 
 /** Delay in milliseconds before committing a streaming content update to the parser. */
@@ -102,9 +103,51 @@ export default function StreamingMarkdown({
   }, [content, streaming]);
 
   return (
-    <div className="prose prose-sm prose-invert max-w-none">
+    <div className="text-sm leading-relaxed break-words">
       <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
         components={{
+          // Headings — explicit spacing/size since @tailwindcss/typography isn't installed
+          h1: ({ children }) => (
+            <h1 className="text-lg font-bold text-white mt-4 mb-2 first:mt-0">{children}</h1>
+          ),
+          h2: ({ children }) => (
+            <h2 className="text-base font-bold text-white mt-4 mb-2 first:mt-0">{children}</h2>
+          ),
+          h3: ({ children }) => (
+            <h3 className="text-sm font-semibold text-gray-100 mt-3 mb-1.5 first:mt-0">{children}</h3>
+          ),
+          // Lists — restore markers + vertical rhythm
+          ul: ({ children }) => (
+            <ul className="list-disc pl-5 my-2 space-y-1">{children}</ul>
+          ),
+          ol: ({ children }) => (
+            <ol className="list-decimal pl-5 my-2 space-y-1">{children}</ol>
+          ),
+          li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+          strong: ({ children }) => (
+            <strong className="font-semibold text-white">{children}</strong>
+          ),
+          hr: () => <hr className="my-3 border-gray-700" />,
+          blockquote: ({ children }) => (
+            <blockquote className="border-l-2 border-gray-600 pl-3 my-2 text-gray-300 italic">
+              {children}
+            </blockquote>
+          ),
+          // GFM tables
+          table: ({ children }) => (
+            <div className="my-2 overflow-x-auto">
+              <table className="w-full text-xs border-collapse">{children}</table>
+            </div>
+          ),
+          th: ({ children }) => (
+            <th className="border border-gray-700 px-2 py-1 text-left font-semibold bg-gray-900/60">
+              {children}
+            </th>
+          ),
+          td: ({ children }) => (
+            <td className="border border-gray-700 px-2 py-1 align-top">{children}</td>
+          ),
           // Override anchor to open in new tab safely (T-06-01)
           a: ({ href, children }) => (
             <a
@@ -139,7 +182,7 @@ export default function StreamingMarkdown({
           // Plain text strings are split by the ticker regex; no raw HTML is used (T-06-01).
           p: ({ children }) => {
             if (tickers.size === 0) {
-              return <p>{children}</p>;
+              return <p className="my-2 leading-relaxed first:mt-0 last:mb-0">{children}</p>;
             }
             const enhanced = Array.isArray(children)
               ? children.flatMap((child, i) =>
@@ -152,7 +195,7 @@ export default function StreamingMarkdown({
               : typeof children === "string"
               ? renderWithTickerChips(children, tickers)
               : children;
-            return <p>{enhanced}</p>;
+            return <p className="my-2 leading-relaxed first:mt-0 last:mb-0">{enhanced}</p>;
           },
         }}
       >
