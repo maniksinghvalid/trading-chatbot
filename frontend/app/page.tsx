@@ -19,6 +19,7 @@
 import { useState } from "react";
 import ChatWindow from "@/components/ChatWindow";
 import SessionList from "@/components/SessionList";
+import AuthButton from "@/components/AuthButton";
 import type { Message } from "@/lib/types";
 
 export default function Home() {
@@ -43,6 +44,7 @@ export default function Home() {
         <span className="text-xs text-gray-500 hidden sm:block">
           Pinecone RAG · SSE streaming
         </span>
+        <AuthButton />
       </header>
       <div className="flex flex-1 overflow-hidden">
         <SessionList
