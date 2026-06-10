@@ -67,9 +67,16 @@ class Turn(SQLModel, table=True):
 # Engine — bound to settings.database_url; tables created at module load (v0)
 # ---------------------------------------------------------------------------
 
+# `check_same_thread` is a SQLite-only connect arg (psycopg/Postgres rejects it
+# with "invalid connection option"). Apply it only when the URL is SQLite.
+_connect_args = (
+    {"check_same_thread": False}
+    if settings.database_url.startswith("sqlite")
+    else {}
+)
 engine = create_engine(
     settings.database_url,
-    connect_args={"check_same_thread": False},
+    connect_args=_connect_args,
 )
 SQLModel.metadata.create_all(engine)
 
