@@ -30,7 +30,10 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_ttl_hours: int = 24
     email_provider_api_key: str = ""  # Resend API key (set EMAIL_PROVIDER_API_KEY)
-    magic_link_base_url: str = "http://localhost:8000/auth/callback"
+    # The magic-link URL must point at the FRONTEND callback page (which exchanges
+    # the token for a JWT, stores it, and redirects to chat) — NOT the backend
+    # endpoint, which would just render raw JSON in the browser.
+    magic_link_base_url: str = "http://localhost:3000/auth/callback"
     frontend_base_url: str = "http://localhost:3000"
     # Magic-link email sender. MUST be a Resend-verified domain in production.
     # Default is Resend's shared test sender, which delivers ONLY to the Resend
