@@ -18,7 +18,10 @@ Functions:
       (audit trail; stored as JSON so it works on both SQLite and Postgres).
 
   history(session_id, limit=20, user_id=None) -> list[Turn]
-      Returns turns for the session ordered oldest-first (turn_index ASC).
+      Returns the MOST RECENT `limit` turns for the session, ordered
+      oldest-first within that window (turn_index ASC).
+      Implemented as: ORDER BY turn_index DESC LIMIT N, then reversed to ASC,
+      so the LLM and coreference logic always see the tail of the conversation.
       When user_id is provided, enforces ownership: non-owner gets [].
       The limit caps the context window sent to the LLM in routes/chat.py.
 
@@ -143,7 +146,12 @@ def history(
     limit: int = 20,
     user_id: Optional[str] = None,
 ) -> list[Turn]:
-    """Return up to `limit` turns for the session, oldest first.
+    """Return the most recent `limit` turns for the session, oldest-first.
+
+    Selects turns ordered by turn_index DESC with a LIMIT, then reverses the
+    result to turn_index ASC before returning.  This ensures callers always
+    see the tail of the conversation (most recent N turns) in display/LLM
+    order (oldest first within the window), rather than the oldest N turns.
 
     When user_id is provided, ownership is enforced: if the session's turns
     don't belong to that user, an empty list is returned (T-02-03-02 — IDOR
@@ -155,17 +163,20 @@ def history(
         user_id: When provided, only return turns owned by this user.
 
     Returns:
-        List of Turn objects ordered by turn_index ascending (oldest first).
+        List of Turn objects ordered by turn_index ascending (oldest first
+        within the most-recent window).
         Returns [] if user_id is provided and the session is owned by another.
     """
     with Session(engine) as db:
+        # Fetch the most recent N turns by ordering DESC + limit, then reverse
+        # to ASC so callers get the tail of the conversation in display order.
         statement = (
             select(Turn)
             .where(Turn.session_id == session_id)
-            .order_by(Turn.turn_index.asc())  # type: ignore[attr-defined]
+            .order_by(Turn.turn_index.desc())  # type: ignore[attr-defined]
             .limit(limit)
         )
-        turns: list[Turn] = list(db.exec(statement).all())
+        turns: list[Turn] = list(reversed(list(db.exec(statement).all())))
 
     if user_id is not None:
         # Ownership check: any turn in the session must belong to user_id
