@@ -127,6 +127,23 @@ def _prev_offered_live_data(prior_turns) -> bool:
     return False
 
 
+def _offered_ticker(prior_turns) -> str | None:
+    """Return the ticker_scope of the most recent assistant no-data offer.
+
+    Scans prior_turns in reverse for the first assistant turn whose content
+    contains the no-data offer phrase ("live market data").  Returns its
+    ticker_scope (which was persisted as the offered ticker at offer time).
+
+    This pins the affirmative reply to the correct ticker even if coreference
+    would otherwise resolve a different (stale) ticker.  Returns None when no
+    offer turn is found.
+    """
+    for t in reversed(prior_turns):
+        if t.role == "assistant" and "live market data" in (t.content or "").lower():
+            return t.ticker_scope
+    return None
+
+
 def _format_quote_message(ticker: str, q: dict) -> str:
     """Deterministic, disclaimer-bearing summary of a live quote dict."""
     def _fnum(x, fmt: str) -> str:
@@ -214,15 +231,18 @@ def post_chat(
         # Affirmative follow-up to a prior "live market data?" offer → fetch a quote
         # instead of looping the same no-data message.
         if ticker_upper and _is_affirmative(req.message) and _prev_offered_live_data(prior_turns):
+            # Pin the offered ticker from the offer turn so an unrelated ticker
+            # with stored data cannot hijack the quote (02-08 / QUOTE-01 hardening).
+            quote_ticker = _offered_ticker(prior_turns) or ticker_upper
             append_turn(session_id, "user", req.message, ticker=req.ticker, user_id=user_id)
             try:
-                msg = _format_quote_message(ticker_upper, market_data.quote(ticker_upper))
+                msg = _format_quote_message(quote_ticker, market_data.quote(quote_ticker))
             except QuoteUnavailableError:
                 msg = (
-                    f"Live market data for {ticker_upper} is unavailable right now. "
+                    f"Live market data for {quote_ticker} is unavailable right now. "
                     "Please try again shortly. (Educational use only — not financial advice.)"
                 )
-            append_turn(session_id, "assistant", msg, ticker=ticker_upper, user_id=user_id)
+            append_turn(session_id, "assistant", msg, ticker=quote_ticker, user_id=user_id)
             return ChatResponse(message=msg, citations=[], session_id=session_id)
 
         ticker_label = ticker_upper or "the requested ticker"
@@ -397,18 +417,21 @@ def post_chat_stream(
             # Affirmative follow-up to a prior "live market data?" offer → fetch a
             # quote (emit a quote event so the QuoteCard renders) instead of looping.
             if ticker_upper and _is_affirmative(req.message) and _prev_offered_live_data(prior_turns):
+                # Pin the offered ticker from the offer turn so an unrelated ticker
+                # with stored data cannot hijack the quote (02-08 / QUOTE-01 hardening).
+                quote_ticker = _offered_ticker(prior_turns) or ticker_upper
                 append_turn(session_id, "user", req.message, ticker=req.ticker, user_id=user_id)
                 try:
-                    q = market_data.quote(ticker_upper)
+                    q = market_data.quote(quote_ticker)
                     yield {"event": "quote", "data": json.dumps(q)}
-                    msg = _format_quote_message(ticker_upper, q)
+                    msg = _format_quote_message(quote_ticker, q)
                 except QuoteUnavailableError:
                     msg = (
-                        f"Live market data for {ticker_upper} is unavailable right now. "
+                        f"Live market data for {quote_ticker} is unavailable right now. "
                         "Please try again shortly. (Educational use only — not financial advice.)"
                     )
                 yield {"event": "token", "data": msg}
-                append_turn(session_id, "assistant", msg, ticker=ticker_upper, user_id=user_id)
+                append_turn(session_id, "assistant", msg, ticker=quote_ticker, user_id=user_id)
                 yield {"event": "done", "data": ""}
                 return
 

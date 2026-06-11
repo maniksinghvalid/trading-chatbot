@@ -476,3 +476,111 @@ def test_post_chat_quote_unavailable_degrades_gracefully(client, auth_headers, m
     data = resp.json()
     assert "message" in data
     assert len(data["message"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# 02-08 gap-closure regression tests
+# ---------------------------------------------------------------------------
+
+def test_coreference_resolves_most_recent_ticker(client, auth_headers, monkeypatch):
+    """MARA -> CLOV -> bare 'stock price' coreferences CLOV, not MARA.
+
+    Regression for UAT test 3: when a user switches from one ticker to another,
+    a follow-up with no explicit ticker must inherit the MOST RECENTLY mentioned
+    ticker (CLOV), not the stale earlier one (MARA).
+    """
+    import uuid as _uuid
+    session_id = str(_uuid.uuid4())
+
+    # Turn 1: MARA question — retrieve returns MARA chunks, extract_tickers returns MARA
+    monkeypatch.setattr("src.routes.chat.extract_tickers", lambda text: ["MARA"])
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.complete", lambda *a, **kw: _FAKE_LLM_ANSWER)
+    resp1 = client.post(
+        "/chat",
+        json={"message": "tell me about MARA", "session_id": session_id},
+        headers=auth_headers,
+    )
+    assert resp1.status_code == 200
+
+    # Turn 2: CLOV question — extract_tickers returns CLOV
+    monkeypatch.setattr("src.routes.chat.extract_tickers", lambda text: ["CLOV"])
+    resp2 = client.post(
+        "/chat",
+        json={"message": "now tell me about CLOV", "session_id": session_id},
+        headers=auth_headers,
+    )
+    assert resp2.status_code == 200
+
+    # Turn 3: bare "stock price" — no explicit ticker, no extraction result
+    retrieve_calls: list[dict] = []
+
+    def _capturing_retrieve(text, ticker=None, k=6):
+        retrieve_calls.append({"text": text, "ticker": ticker})
+        return _FAKE_CHUNKS
+
+    monkeypatch.setattr("src.routes.chat.extract_tickers", lambda text: [])
+    monkeypatch.setattr("src.routes.chat.retrieve", _capturing_retrieve)
+    resp3 = client.post(
+        "/chat",
+        json={"message": "stock price", "session_id": session_id},
+        headers=auth_headers,
+    )
+    assert resp3.status_code == 200
+
+    assert len(retrieve_calls) == 1, "retrieve must be called exactly once for turn 3"
+    assert retrieve_calls[0]["ticker"] == "CLOV", (
+        f"Expected coreference to resolve 'CLOV' (most recent ticker), "
+        f"got {retrieve_calls[0]['ticker']!r}"
+    )
+
+
+def test_nodata_affirmative_fetches_offered_ticker(client, auth_headers, monkeypatch):
+    """AAPL no-data offer -> 'yes' -> AAPL live quote (not a different ticker).
+
+    Regression for UAT test 5: when the bot offered live data for AAPL and the
+    user replies 'yes', the quote must be fetched for AAPL — even if some other
+    ticker (MARA) happens to have stored data that would otherwise be retrieved.
+    """
+    import uuid as _uuid
+    session_id = str(_uuid.uuid4())
+
+    # Turn 1: AAPL question with no stored data — produces no-data offer persisted
+    # with ticker_scope="AAPL" and content containing "live market data"
+    monkeypatch.setattr("src.routes.chat.extract_tickers", lambda text: ["AAPL"])
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: [])  # no data
+    resp1 = client.post(
+        "/chat",
+        json={"message": "bull case for Apple", "session_id": session_id},
+        headers=auth_headers,
+    )
+    assert resp1.status_code == 200
+    assert "live market data" in resp1.json()["message"].lower(), (
+        "Expected a no-data offer containing 'live market data'"
+    )
+
+    # Turn 2: user replies "yes" — retrieve still empty; quote should be called for AAPL
+    quote_calls: list[str] = []
+
+    def _capturing_quote(ticker: str) -> dict:
+        quote_calls.append(ticker)
+        return _FAKE_QUOTE
+
+    # extract_tickers returns nothing (bare affirmative), retrieve still empty
+    monkeypatch.setattr("src.routes.chat.extract_tickers", lambda text: [])
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: [])
+    monkeypatch.setattr(market_data, "quote", _capturing_quote)
+
+    resp2 = client.post(
+        "/chat",
+        json={"message": "yes", "session_id": session_id},
+        headers=auth_headers,
+    )
+    assert resp2.status_code == 200
+
+    assert len(quote_calls) == 1, (
+        f"Expected market_data.quote() called once, got {len(quote_calls)} calls"
+    )
+    assert quote_calls[0] == "AAPL", (
+        f"Expected quote called with 'AAPL' (the offered ticker), got {quote_calls[0]!r}"
+    )
