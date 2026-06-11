@@ -38,11 +38,19 @@ from typing import Optional
 from sqlmodel import Field, SQLModel, Session, create_engine, select
 
 from src.config import settings
-from src.session_store import engine  # reuse the same engine (same DB)
+from src import session_store
 
-# Re-export the shared engine so tests can monkeypatch it uniformly.
-# This module holds a module-level reference; tests patch `src.rate_limiter.engine`.
-engine = engine  # noqa: F811 — explicit re-export to make monkeypatching clean
+
+def _engine():
+    """Resolve the shared DB engine dynamically from session_store at call time.
+
+    Referencing session_store.engine lazily (instead of capturing it at import)
+    means swapping session_store.engine is honoured here too — e.g. the in-memory
+    SQLite engine the test fixtures install, or a reconfigured production engine.
+    Capturing it at import previously pinned this module to a stale engine, which
+    broke every chat request once the DB URL changed to Postgres.
+    """
+    return session_store.engine
 
 
 # ---------------------------------------------------------------------------
@@ -100,9 +108,11 @@ class UserBudget(SQLModel, table=True):
     input_token_count: int = Field(default=0)
 
 
-# Create the table in the shared DB at import time (mirrors session_store pattern).
-# The engine is already initialised by session_store; this call is idempotent.
-SQLModel.metadata.create_all(engine)
+# NOTE: table creation is NOT done at import time. The UserBudget table is
+# registered in the shared SQLModel.metadata simply by defining the class above,
+# so session_store.init_db() (called once at app startup) creates it alongside
+# the other tables. Keeping create_all out of import avoids opening a DB
+# connection on import (which breaks the test suite + app when the DB is down).
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +156,7 @@ def check_and_increment(user_id: str, input_tokens: int = 0) -> None:
     now = _now()
     today_str = now.date().isoformat()  # e.g. "2026-06-09"
 
-    with Session(engine) as db:
+    with Session(_engine()) as db:
         row: Optional[UserBudget] = db.get(UserBudget, user_id)
 
         if row is None:
@@ -196,7 +206,7 @@ def current_usage(user_id: Optional[str] = None) -> list[dict] | dict:
         dicts when ``user_id`` is None.  Returns an empty dict for an unknown
         user_id (no row exists yet).
     """
-    with Session(engine) as db:
+    with Session(_engine()) as db:
         if user_id is not None:
             row = db.get(UserBudget, user_id)
             if row is None:

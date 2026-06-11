@@ -67,7 +67,11 @@ class Turn(SQLModel, table=True):
 
 
 # ---------------------------------------------------------------------------
-# Engine — bound to settings.database_url; tables created at module load (v0)
+# Engine — bound to settings.database_url. create_engine() is lazy (no
+# connection until first use), so importing this module never touches the DB.
+# Tables are created by init_db() at app startup (NOT at import) so a briefly
+# unreachable database (e.g. Postgres not yet up) does not break module import,
+# the FastAPI app, or the test suite.
 # ---------------------------------------------------------------------------
 
 # `check_same_thread` is a SQLite-only connect arg (psycopg/Postgres rejects it
@@ -81,7 +85,18 @@ engine = create_engine(
     settings.database_url,
     connect_args=_connect_args,
 )
-SQLModel.metadata.create_all(engine)
+
+
+def init_db() -> None:
+    """Create all tables on the configured engine.
+
+    Called once at application startup (see main.py lifespan). Kept OUT of
+    module import so that importing session_store never opens a DB connection —
+    this keeps the test suite (which swaps in an in-memory SQLite engine via an
+    autouse fixture) and module import resilient when the production database is
+    momentarily unreachable.
+    """
+    SQLModel.metadata.create_all(engine)
 
 
 # ---------------------------------------------------------------------------

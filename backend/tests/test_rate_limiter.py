@@ -51,8 +51,10 @@ from src.rate_limiter import BudgetExceeded, UserBudget, check_and_increment, cu
 def isolated_db(monkeypatch):
     """Give every test its own in-memory SQLite with both SQLModel tables.
 
-    Patches both session_store.engine and rate_limiter.engine to the same
-    in-memory StaticPool DB so TestClient ASGI threads share the state.
+    Patches session_store.engine to an in-memory StaticPool DB so TestClient
+    ASGI threads share the state. rate_limiter resolves the engine dynamically
+    via session_store.engine (rate_limiter._engine()), so patching it here is
+    sufficient — there is no separate rate_limiter.engine to patch.
     """
     mem_engine = create_engine(
         "sqlite:///:memory:",
@@ -61,7 +63,6 @@ def isolated_db(monkeypatch):
     )
     SQLModel.metadata.create_all(mem_engine)
     monkeypatch.setattr(ss, "engine", mem_engine)
-    monkeypatch.setattr(rl, "engine", mem_engine)
     yield mem_engine
 
 
@@ -147,7 +148,7 @@ def test_midnight_utc_reset(monkeypatch):
     today_str = "2026-06-09"
 
     # Manually insert a row dated yesterday with request_count at the limit
-    with Session(rl.engine) as db:
+    with Session(ss.engine) as db:
         row = UserBudget(
             user_id=user_id,
             usage_date=yesterday,
@@ -165,7 +166,7 @@ def test_midnight_utc_reset(monkeypatch):
     check_and_increment(user_id)
 
     # Verify request_count is 1 (reset to 1, not 0 then incremented)
-    with Session(rl.engine) as db:
+    with Session(ss.engine) as db:
         row = db.get(UserBudget, user_id)
     assert row is not None
     assert row.usage_date == today_str
