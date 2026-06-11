@@ -93,19 +93,16 @@ def test_history_returns_oldest_first():
 
 
 def test_history_respects_limit():
-    """history(limit=N) returns at most N turns."""
+    """history(limit=N) returns the MOST RECENT N turns, ordered oldest-first within that window."""
     sid = str(uuid.uuid4())
     for i in range(10):
         append_turn(sid, "user", f"message {i}", ticker="MSFT")
 
     turns = history(sid, limit=3)
     assert len(turns) == 3
-    # Should be the 3 most recent (highest turn_index) — or oldest 3 depending on impl.
-    # The plan says "oldest-first" and slice 3 step 3.2 says load history(limit=10),
-    # so limit is applied after ordering; the slice's purpose is to cap the context window.
-    # We assert the returned turns are from the earlier turns (oldest first, up to limit).
-    assert turns[0].turn_index == 0
-    assert turns[2].turn_index == 2
+    # Must be the 3 most recent turns (turn_index 7, 8, 9), still returned ASC
+    assert turns[0].turn_index == 7
+    assert turns[-1].turn_index == 9
 
 
 def test_history_default_limit_20():
@@ -408,6 +405,65 @@ def test_cross_backend_parity_sqlite_restart_simulation():
             os.unlink(db_path)
         except OSError:
             pass  # Cleanup best-effort
+
+
+# ---------------------------------------------------------------------------
+# Most-recent-N windowing regression tests (02-08 gap closure)
+# ---------------------------------------------------------------------------
+
+def test_history_returns_most_recent_when_over_limit():
+    """history(limit=N) when session has >N turns returns exactly the last N, ordered ASC.
+
+    Regression test for the oldest-N bug: history() must window the tail of the
+    conversation (DESC LIMIT N, then reversed to ASC) so callers see recent context.
+    """
+    sid = str(uuid.uuid4())
+    total = 15
+    for i in range(total):
+        append_turn(sid, "user", f"turn {i}", ticker="AAPL")
+
+    turns = history(sid, limit=5)
+    assert len(turns) == 5
+    # Should be turn_index 10..14 in ascending order
+    expected_indices = list(range(10, 15))
+    assert [t.turn_index for t in turns] == expected_indices
+
+
+def test_coreference_newest_scope_across_window():
+    """Coreference resolves the MOST-RECENTLY referenced ticker even in a >limit session.
+
+    Simulates a conversation longer than the history window where an early turn has
+    ticker_scope MARA and a later turn (inside the most-recent window) has CLOV.
+    The coreference pattern used in routes/chat.py must yield CLOV, not MARA.
+    """
+    sid = str(uuid.uuid4())
+    limit = 10
+
+    # Turn 0: early MARA mention (will fall outside the window)
+    append_turn(sid, "user", "tell me about MARA", ticker="MARA")
+
+    # Turns 1..9: filler turns without ticker_scope, pushing MARA outside window
+    for i in range(9):
+        append_turn(sid, "assistant", f"reply {i}", ticker=None)
+
+    # Turn 10: recent CLOV mention (inside the most-recent-10 window)
+    append_turn(sid, "user", "now tell me about CLOV", ticker="CLOV")
+
+    # Turn 11: follow-up with no ticker (will trigger coreference)
+    append_turn(sid, "user", "what's the stock price?", ticker=None)
+
+    # The route uses: next((t.ticker_scope for t in reversed(history(sid, limit=10)) if t.ticker_scope), None)
+    recent_turns = history(sid, limit=limit)
+    prior_ticker = next(
+        (t.ticker_scope for t in reversed(recent_turns) if t.ticker_scope),
+        None,
+    )
+
+    # CLOV is the most recent non-null ticker_scope in the window
+    assert prior_ticker == "CLOV", (
+        f"Expected coreference to resolve CLOV (most recent), got {prior_ticker!r}. "
+        "This means history() is still returning the OLDEST N turns."
+    )
 
 
 @pytest.mark.postgres
