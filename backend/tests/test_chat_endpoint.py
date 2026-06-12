@@ -584,3 +584,54 @@ def test_nodata_affirmative_fetches_offered_ticker(client, auth_headers, monkeyp
     assert quote_calls[0] == "AAPL", (
         f"Expected quote called with 'AAPL' (the offered ticker), got {quote_calls[0]!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# v1.0 milestone-audit hardening: IDOR — cross-user history must not leak
+# ---------------------------------------------------------------------------
+
+def test_post_chat_does_not_leak_other_users_history(client, monkeypatch):
+    """User A supplying User B's session_id must NOT load B's prior turns as context.
+
+    Regression for the v1.0 milestone-audit IDOR finding: chat.py loaded
+    history(session_id) without user_id, so a guessed/leaked session_id would
+    surface another user's conversation in the LLM context window. history() is
+    now ownership-scoped (user_id passed), returning [] for a non-owned session.
+    """
+    from src.auth import issue_jwt
+
+    headers_b = {"Authorization": f"Bearer {issue_jwt('userb@example.com')}"}
+    headers_a = {"Authorization": f"Bearer {issue_jwt('usera@example.com')}"}
+    shared_session = "shared-session-idor-test"
+
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.complete", lambda *a, **kw: _FAKE_LLM_ANSWER)
+
+    # User B writes a distinctive turn into the session.
+    resp_b = client.post(
+        "/chat",
+        json={"message": "USERB_SECRET bull case for MARA", "ticker": "MARA", "session_id": shared_session},
+        headers=headers_b,
+    )
+    assert resp_b.status_code == 200
+
+    # User A reuses B's session_id — capture exactly what reaches the LLM.
+    captured_messages: list = []
+
+    def _capturing_complete(system, messages):
+        captured_messages.extend(messages)
+        return _FAKE_LLM_ANSWER
+
+    monkeypatch.setattr("src.routes.chat.complete", _capturing_complete)
+
+    resp_a = client.post(
+        "/chat",
+        json={"message": "what is new", "ticker": "MARA", "session_id": shared_session},
+        headers=headers_a,
+    )
+    assert resp_a.status_code == 200
+
+    joined = " ".join(m.get("content", "") for m in captured_messages)
+    assert "USERB_SECRET" not in joined, (
+        "IDOR: User B's prior turns leaked into User A's LLM context"
+    )

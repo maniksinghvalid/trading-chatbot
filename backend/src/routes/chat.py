@@ -193,7 +193,10 @@ def post_chat(
     # --- Step 1: Resolve session_id + load history ---
     session_id: str = req.session_id or str(uuid.uuid4())
 
-    prior_turns = history(session_id, limit=_HISTORY_LIMIT)
+    # Ownership-scoped: pass user_id so a guessed/leaked session_id belonging to
+    # another user never leaks that user's prior turns into this user's LLM
+    # context (IDOR — history() returns [] for a non-owned session).
+    prior_turns = history(session_id, limit=_HISTORY_LIMIT, user_id=user_id)
 
     # --- Slice 6 / TICK-01: Extract tickers + classify intent from the message ---
     # extract_tickers() handles both explicit symbols and company-name mentions.
@@ -354,7 +357,9 @@ def post_chat_stream(
     async def _event_generator() -> AsyncGenerator[dict, None]:
         # --- Step 1: Resolve session_id + load history ---
         session_id: str = req.session_id or str(uuid.uuid4())
-        prior_turns = history(session_id, limit=_HISTORY_LIMIT)
+        # Ownership-scoped (IDOR fix): never load another user's turns as context
+        # when their session_id is supplied. history() returns [] for non-owners.
+        prior_turns = history(session_id, limit=_HISTORY_LIMIT, user_id=user_id)
 
         # Emit session event immediately so the client has the ID
         yield {"event": "session", "data": session_id}
