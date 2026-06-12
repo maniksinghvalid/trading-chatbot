@@ -35,9 +35,12 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
+# Redeclare the build arg in this stage (ARG values don't cross FROM boundaries)
+ARG NEXT_PUBLIC_API_BASE=http://localhost:8000
+
 # Copy the built output and runtime dependencies from builder
 COPY --from=builder /app/.next ./.next
-COPY --from=builder /app/public ./public 2>/dev/null || true
+COPY --from=builder /app/public ./public
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/package-lock.json ./package-lock.json
 COPY --from=builder /app/next.config.mjs ./next.config.mjs
@@ -49,7 +52,11 @@ RUN npm ci --omit=dev
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 USER appuser
 
-# Allow runtime override of the API base (for platforms that inject env at container start)
+# Server-side default for the API base. NOTE: NEXT_PUBLIC_* vars are inlined into
+# the client bundle at build time (npm run build), so the value the *browser* uses is
+# fixed by --build-arg NEXT_PUBLIC_API_BASE=... above. This ENV only affects the
+# server process (next start) and does NOT change the already-compiled client JS;
+# to retarget the frontend's API URL you must rebuild with a new build-arg.
 ENV NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE}
 
 EXPOSE 3000

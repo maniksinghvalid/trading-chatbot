@@ -5,7 +5,10 @@ All fields are read from environment variables (or a .env file via pydantic-sett
 The module-level `settings` instance is the single source of truth for runtime config.
 """
 
-from pydantic_settings import BaseSettings
+from typing import Annotated
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode
 
 
 class Settings(BaseSettings):
@@ -21,8 +24,49 @@ class Settings(BaseSettings):
     # Database (SQLite for Phase 1; switchable to Postgres in Phase 2)
     database_url: str = "sqlite:///./chat.db"
 
-    # CORS
-    cors_origins: list[str] = ["http://localhost:3000"]
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _force_psycopg_driver(cls, v):
+        # This project ships psycopg v3 only (no psycopg2). SQLAlchemy maps the
+        # bare "postgresql://" / "postgres://" schemes to the psycopg2 dialect,
+        # which then fails with ModuleNotFoundError. The Supabase dashboard (and
+        # most tools) hand out exactly those bare schemes, so normalize them to
+        # the psycopg3 driver here rather than relying on every pasted URL to
+        # include "+psycopg" by hand.
+        if isinstance(v, str):
+            for prefix in ("postgresql://", "postgres://"):
+                if v.startswith(prefix):
+                    return "postgresql+psycopg://" + v[len(prefix):]
+        return v
+
+    # CORS — accepts a comma-separated string from the environment
+    # (e.g. CORS_ORIGINS=http://localhost:3000,https://app.example.com).
+    # NoDecode disables pydantic-settings' default JSON decoding so the raw
+    # string reaches the validator below instead of failing JSON parsing.
+    cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _split_cors_origins(cls, v):
+        # Accept BOTH supported env formats:
+        #   - JSON array:  CORS_ORIGINS=["http://a","http://b"]
+        #   - CSV string:  CORS_ORIGINS=http://a,http://b
+        # NoDecode disabled pydantic's automatic JSON parsing, so a JSON-array
+        # string would otherwise be kept literally (brackets and quotes intact)
+        # and never match a real Origin header — handle it explicitly here.
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith("["):
+                import json
+
+                try:
+                    parsed = json.loads(s)
+                    if isinstance(parsed, list):
+                        return [str(o).strip() for o in parsed if str(o).strip()]
+                except json.JSONDecodeError:
+                    pass  # fall through to CSV parsing
+            return [origin.strip() for origin in s.split(",") if origin.strip()]
+        return v
 
     # Auth — magic-link + JWT (slice 8 / AUTH-01)
     # jwt_secret: used for HS256 signing of both magic-link tokens and session JWTs.

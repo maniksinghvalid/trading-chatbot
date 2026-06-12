@@ -1,63 +1,55 @@
-# docker-compose.production.yml — self-hosted production stack for trading-chatbot
+# docker-compose.supabase.yml — production stack for trading-chatbot using
+# Supabase as the managed Postgres backend (no self-hosted db service).
+#
+# Differs from docker-compose.production.yml:
+#   - The `db` service is removed; Postgres is Supabase (external, managed).
+#   - backend has no `depends_on: db` (nothing local to wait for).
+#   - DATABASE_URL points at the Supabase *Session pooler* with SSL.
 #
 # Services:
-#   db       — Postgres 16 (persistent volume)
 #   backend  — FastAPI / uvicorn image built from backend/Dockerfile
 #   frontend — Next.js image built from frontend/Dockerfile
 #
 # IMPORTANT: All secrets are injected via environment variables.
 # DO NOT hardcode any secret values in this file or in any Dockerfile.
-# Set secrets via:
-#   export PINECONE_READ_KEY=...
-#   export OPENAI_API_KEY=...
-#   docker compose -f docker-compose.production.yml up -d
 #
-# Or use a .env file (NOT committed to git — add .env to .gitignore).
+# Supabase connection (set in env / .env — NOT committed):
+#   SUPABASE_DB_PASSWORD   — the database password from the Supabase dashboard
+#   SUPABASE_PROJECT_REF   — your project ref (e.g. abcdefghijklmnop)
+#   SUPABASE_REGION        — pooler region (e.g. us-east-1)
+#
+# Then either:
+#   (a) set DATABASE_URL directly to the full Supabase URL, or
+#   (b) let the default below compose it from the three vars above.
+#
+# Connection notes:
+#   - Use the SESSION pooler (host aws-0-<region>.pooler.supabase.com, port 5432).
+#     The username MUST be `postgres.<project-ref>` (pooler requirement).
+#   - sslmode=require is mandatory — Supabase rejects non-SSL connections.
+#   - Do NOT use the direct connection (db.<ref>.supabase.co:5432): it is
+#     IPv6-only and typically unreachable from inside Docker.
+#   - If you switch to the TRANSACTION pooler (port 6543), append
+#     `&prepare_threshold=0` — psycopg3 prepared statements break under it.
 #
 # Usage:
-#   docker compose -f docker-compose.production.yml up -d   # start all services
-#   docker compose -f docker-compose.production.yml down    # stop
-#   docker compose -f docker-compose.production.yml down -v # full reset (removes DB volume)
+#   docker compose -f docker-compose.supabase.yml up -d   # start backend + frontend
+#   docker compose -f docker-compose.supabase.yml down    # stop
 
 services:
 
   # ------------------------------------------------------------------
-  # Postgres 16 — persistent relational store for sessions + budgets
-  # ------------------------------------------------------------------
-  db:
-    image: postgres:16-alpine
-    container_name: trading-chatbot-db-prod
-    environment:
-      POSTGRES_DB: chatbot
-      POSTGRES_USER: chatbot
-      # Set POSTGRES_PASSWORD via env or .env file — never hardcode
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    volumes:
-      - pgdata-prod:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U chatbot -d chatbot"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
-    restart: unless-stopped
-    # DB should NOT be publicly exposed in production
-    # ports: ["5432:5432"]  # remove this line — access via internal network only
-
-  # ------------------------------------------------------------------
-  # Backend — FastAPI / uvicorn
+  # Backend — FastAPI / uvicorn (talks to Supabase Postgres)
   # ------------------------------------------------------------------
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: trading-chatbot-backend
-    depends_on:
-      db:
-        condition: service_healthy
     environment:
-      # Database — uses the internal compose network hostname
-      DATABASE_URL: postgresql+psycopg://chatbot:${POSTGRES_PASSWORD}@db:5432/chatbot
+      # Database — Supabase Session pooler over SSL.
+      # Override DATABASE_URL wholesale, or supply the three SUPABASE_* vars
+      # and let this default compose the URL.
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://postgres.${SUPABASE_PROJECT_REF}:${SUPABASE_DB_PASSWORD}@aws-0-${SUPABASE_REGION}.pooler.supabase.com:5432/postgres?sslmode=require}
 
       # Pinecone — READ key only (consumer contract)
       PINECONE_READ_KEY: ${PINECONE_READ_KEY}
@@ -117,6 +109,4 @@ services:
       - "${FRONTEND_PORT:-3000}:3000"
     restart: unless-stopped
 
-volumes:
-  pgdata-prod:
-    driver: local
+# No volumes — persistent storage lives in Supabase, not in a local pgdata volume.
