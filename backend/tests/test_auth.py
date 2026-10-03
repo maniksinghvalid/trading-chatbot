@@ -71,6 +71,17 @@ def in_memory_db(monkeypatch):
     yield mem_engine
 
 
+def _tamper(token: str) -> str:
+    """Flip a character in the middle of the JWT signature segment.
+
+    Not the last character: for a 32-byte HS256 signature its 2 low bits are
+    base64 padding, so some swaps decode to the same bytes and still verify.
+    """
+    head, sig = token.rsplit(".", 1)
+    i = len(sig) // 2
+    return f"{head}.{sig[:i]}{'A' if sig[i] != 'A' else 'B'}{sig[i + 1:]}"
+
+
 # ---------------------------------------------------------------------------
 # Task 1: issue_jwt / decode_jwt
 # ---------------------------------------------------------------------------
@@ -94,8 +105,7 @@ def test_decode_jwt_expired_raises_auth_error():
 def test_decode_jwt_tampered_raises_auth_error():
     """Changing one character in the token signature raises AuthError."""
     token = issue_jwt("tamper@example.com")
-    # Flip last character of the token
-    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+    tampered = _tamper(token)
     with pytest.raises(AuthError):
         decode_jwt(tampered)
 
@@ -118,7 +128,7 @@ def test_magic_link_tampered_token_raises_auth_error():
     """A tampered magic-link token raises AuthError."""
     link = issue_magic_link("tamper@example.com")
     token = link.split("?token=")[1]
-    tampered = token[:-1] + ("X" if token[-1] != "X" else "Y")
+    tampered = _tamper(token)
     with pytest.raises(AuthError):
         verify_magic_token(tampered)
 
