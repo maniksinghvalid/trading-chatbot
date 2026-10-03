@@ -34,8 +34,10 @@ Set **all** of these on the deploy platform before deploying. Never commit them 
 | `PINECONE_HOST` | Backend | Pinecone index host URL |
 | `OPENAI_API_KEY` | Backend | OpenAI API key |
 | `JWT_SECRET` | Backend | Random 32+ byte string for JWT signing |
-| `RESEND_API_KEY` | Backend | Resend email provider key (magic-link auth) |
+| `EMAIL_PROVIDER_API_KEY` | Backend | Resend email provider key (magic-link auth) |
 | `MAGIC_LINK_FROM_EMAIL` | Backend | Verified sender address, e.g. `noreply@yourdomain.com` |
+| `FRONTEND_BASE_URL` | Backend | Public HTTPS URL of the frontend, e.g. `https://chatbot.vercel.app` |
+| `MAGIC_LINK_BASE_URL` | Backend | `<FRONTEND_BASE_URL>/auth/callback` — the FRONTEND callback page, not the backend (compose derives it from `FRONTEND_BASE_URL`) |
 | `BACKEND_URL` | Backend | Public HTTPS URL of the backend, e.g. `https://chatbot-backend.fly.dev` |
 | `CORS_ORIGINS` | Backend | Comma-separated allowed origins, e.g. `https://chatbot.vercel.app` |
 | `NEXT_PUBLIC_API_BASE` | Frontend | Public HTTPS URL of the backend (same as `BACKEND_URL`) |
@@ -67,8 +69,10 @@ fly secrets set \
   PINECONE_HOST="https://trade-reports-xxxx.svc.pinecone.io" \
   OPENAI_API_KEY="sk-..." \
   JWT_SECRET="$(python3 -c "import secrets; print(secrets.token_hex(32))")" \
-  RESEND_API_KEY="re_..." \
+  EMAIL_PROVIDER_API_KEY="re_..." \
   MAGIC_LINK_FROM_EMAIL="noreply@yourdomain.com" \
+  FRONTEND_BASE_URL="https://chatbot.vercel.app" \
+  MAGIC_LINK_BASE_URL="https://chatbot.vercel.app/auth/callback" \
   BACKEND_URL="https://chatbot-backend.fly.dev" \
   CORS_ORIGINS="https://chatbot.vercel.app"
 
@@ -209,8 +213,10 @@ PINECONE_READ_KEY=pc-...
 PINECONE_HOST=https://trade-reports-xxxx.svc.pinecone.io
 OPENAI_API_KEY=sk-...
 JWT_SECRET=generate_with_secrets_token_hex_32
-RESEND_API_KEY=re_...
+EMAIL_PROVIDER_API_KEY=re_...
 MAGIC_LINK_FROM_EMAIL=noreply@example.com
+FRONTEND_BASE_URL=https://example.com
+# MAGIC_LINK_BASE_URL defaults to $FRONTEND_BASE_URL/auth/callback in compose
 BACKEND_URL=https://api.example.com
 CORS_ORIGINS=https://example.com
 
