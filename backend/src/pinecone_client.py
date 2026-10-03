@@ -208,23 +208,84 @@ def _list_ids(index: Any, prefix: str, namespace: str) -> list[str]:
 _LATEST_TTL_S = 600
 
 
+_UNDATED = "00000000"  # legacy runs with no timestamp in their ID; never "latest"
+
+
+def _ttl_bucket() -> int:
+    return int(time.monotonic() // _LATEST_TTL_S)
+
+
 @lru_cache(maxsize=256)
-def _latest_dates_cached(ticker: str, _bucket: int) -> dict[str, str]:
-    latest: dict[str, str] = {}
+def _run_index_cached(ticker: str, _bucket: int) -> dict[str, dict[str, list[str]]]:
+    """{report_type: {run_ts: [chunk ids]}} for every dated run of a ticker.
+    Shared by the cache — callers must not mutate it."""
+    runs: dict[str, dict[str, list[str]]] = {}
     for vid in _list_ids(_get_index(), f"{ticker}:", _get_namespace()):
         parts = vid.split(":")  # <TICKER>:<TYPE>:<YYYYMMDD-HHMM>:<slug>:<n>
-        if len(parts) < 3 or len(parts[2]) < 8:
+        if len(parts) < 5 or len(parts[2]) < 8 or parts[2].startswith(_UNDATED):
             continue
-        d = parts[2]
-        date = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
-        if date > latest.get(parts[1], ""):
-            latest[parts[1]] = date
-    return latest
+        runs.setdefault(parts[1], {}).setdefault(parts[2], []).append(vid)
+    return runs
+
+
+def _run_index(ticker: str) -> dict[str, dict[str, list[str]]]:
+    return _run_index_cached(ticker.upper(), _ttl_bucket())
 
 
 def _latest_dates(ticker: str) -> dict[str, str]:
     """{report_type: newest generated_date} for a ticker, from the sortable ID scheme."""
-    return _latest_dates_cached(ticker.upper(), int(time.monotonic() // _LATEST_TTL_S))
+    latest: dict[str, str] = {}
+    for rtype, runs in _run_index(ticker).items():
+        ts = max(runs)
+        latest[rtype] = f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}"
+    return latest
+
+
+def _chunk_no(vid: str) -> int:
+    tail = vid.rsplit(":", 1)[-1]
+    return int(tail) if tail.isdigit() else 0
+
+
+def _fetch_normalized(ids: list[str]) -> list[dict]:
+    """Fetch IDs in batches of 100 and normalize, keeping `ids` order."""
+    index, namespace = _get_index(), _get_namespace()
+    out: list[dict] = []
+    for start in range(0, len(ids), 100):
+        batch = ids[start:start + 100]
+        res = index.fetch(ids=batch, namespace=namespace)
+        vectors = res.get("vectors", {}) if isinstance(res, dict) else (getattr(res, "vectors", None) or {})
+        for vid in batch:
+            if vid not in vectors:
+                continue
+            try:
+                out.append(_normalize(vectors[vid]))
+            except UnknownSchemaVersionError as exc:
+                logger.error("fetch: skipping record with unknown schema: %s", exc)
+    return out
+
+
+def latest_run_chunks(ticker: str, report_type: str) -> list[dict]:
+    """All chunks of the newest dated run of `report_type`, in chunk order; [] if none."""
+    runs = _run_index(ticker).get(report_type.upper())
+    if not runs:
+        return []
+    return _fetch_normalized(sorted(runs[max(runs)], key=_chunk_no))
+
+
+@lru_cache(maxsize=256)
+def _run_metadata_cached(ticker: str, report_type: str, limit: int, _bucket: int) -> list[dict]:
+    runs = _run_index(ticker).get(report_type, {})
+    firsts = [min(runs[ts], key=_chunk_no) for ts in sorted(runs)[-limit:]]
+    return [
+        {k: v for k, v in c["metadata"].items() if k != "text"}
+        for c in _fetch_normalized(firsts)
+    ]
+
+
+def run_metadata(ticker: str, report_type: str, limit: int = 60) -> list[dict]:
+    """Metadata (no text) of the first chunk of each of the newest `limit` dated runs,
+    oldest → newest. Shared by the cache — callers must not mutate it."""
+    return _run_metadata_cached(ticker.upper(), report_type.upper(), limit, _ttl_bucket())
 
 
 def retrieve(

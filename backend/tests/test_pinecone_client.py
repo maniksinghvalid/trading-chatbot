@@ -225,7 +225,7 @@ class TestRetrieveLatestOnly:
     def _patch(self, monkeypatch: pytest.MonkeyPatch, searches: list):
         import src.pinecone_client as pc
 
-        pc._latest_dates_cached.cache_clear()
+        pc._run_index_cached.cache_clear()
         monkeypatch.setattr(pc, "_get_index", lambda: self._fake_index(searches))
         monkeypatch.setattr(pc, "_get_namespace", lambda: "trade")
         return pc
@@ -253,6 +253,77 @@ class TestRetrieveLatestOnly:
         pc = self._patch(monkeypatch, [])
         results = pc.retrieve("recent options report on MARA", ticker="MARA", k=6)
         assert results[0]["id"] == "MARA:OPTIONS:20260721-1306:preamble:0"
+
+
+class TestRunIndex:
+    """Run-level helpers for insights: newest full report + per-run metadata series."""
+
+    IDS = [
+        "MARA:OPTIONS:00000000-0000:preamble:0",
+        "MARA:OPTIONS:20261002-1311:preamble:0",
+        "MARA:OPTIONS:20261003-1311:expected-move:2",
+        "MARA:OPTIONS:20261003-1311:preamble:0",
+        "MARA:OPTIONS:20261003-1311:volatility-dashboard:1",
+        "MARA:ANALYSIS:20261003-1111:summary:0",
+    ]
+
+    def _fake_index(self, fetched: list):
+        ids = self.IDS
+
+        class FakeIndex:
+            def list(self, prefix, namespace):
+                yield [i for i in ids if i.startswith(prefix)]
+
+            def fetch(self, ids, namespace):
+                fetched.append(list(ids))
+                vectors = {}
+                for i in ids:
+                    ts = i.split(":")[2]
+                    vectors[i] = {"id": i, "metadata": {
+                        "schema_version": 1,
+                        "generated_date": f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}",
+                        "text": i,
+                    }}
+                return {"vectors": vectors}
+
+        return FakeIndex()
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch, fetched: list):
+        import src.pinecone_client as pc
+
+        pc._run_index_cached.cache_clear()
+        pc._run_metadata_cached.cache_clear()
+        monkeypatch.setattr(pc, "_get_index", lambda: self._fake_index(fetched))
+        monkeypatch.setattr(pc, "_get_namespace", lambda: "trade")
+        return pc
+
+    def test_latest_run_chunks_newest_dated_run_in_chunk_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pc = self._patch(monkeypatch, [])
+        chunks = pc.latest_run_chunks("mara", "options")
+        assert [c["id"] for c in chunks] == [
+            "MARA:OPTIONS:20261003-1311:preamble:0",
+            "MARA:OPTIONS:20261003-1311:volatility-dashboard:1",
+            "MARA:OPTIONS:20261003-1311:expected-move:2",
+        ]
+
+    def test_undated_runs_excluded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pc = self._patch(monkeypatch, [])
+        assert pc._latest_dates("MARA") == {"OPTIONS": "2026-10-03", "ANALYSIS": "2026-10-03"}
+        meta = pc.run_metadata("MARA", "OPTIONS")
+        assert [m["generated_date"] for m in meta] == ["2026-10-02", "2026-10-03"]
+        assert all("text" not in m for m in meta)
+
+    def test_run_metadata_uses_first_chunk_and_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fetched: list = []
+        pc = self._patch(monkeypatch, fetched)
+        meta = pc.run_metadata("MARA", "OPTIONS", limit=1)
+        assert [m["generated_date"] for m in meta] == ["2026-10-03"]
+        assert fetched == [["MARA:OPTIONS:20261003-1311:preamble:0"]]
+
+    def test_unknown_type_is_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pc = self._patch(monkeypatch, [])
+        assert pc.latest_run_chunks("MARA", "TECHNICAL") == []
+        assert pc.run_metadata("MARA", "TECHNICAL") == []
 
 
 # ---------------------------------------------------------------------------
