@@ -205,10 +205,10 @@ def _insights_event(future: Future, timeout: float = 0) -> dict | None:
     out or had nothing to show. Never raises — visuals can't break the chat."""
     try:
         payload = future.result(timeout=timeout)
+        return {"event": "insights", "data": json.dumps(payload)} if payload else None
     except Exception as exc:
         logger.warning("insights: dropped (%r)", exc)
         return None
-    return {"event": "insights", "data": json.dumps(payload)} if payload else None
 
 
 @router.post("/chat", response_model=ChatResponse)

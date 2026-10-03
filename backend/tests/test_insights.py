@@ -380,3 +380,36 @@ class TestBuildInsights:
         monkeypatch.setattr(insights.pc, "run_metadata", lambda *a, **kw: [])
         monkeypatch.setattr(insights.pc, "latest_run_chunks", lambda t, rt: [{"text": VDY_OPTIONS, "metadata": meta}])
         assert insights.build_insights("VDY", {"OPTIONS"}, "factual") is None
+
+
+class TestStrategyLegsAreAllOrNothing:
+    """Final review: an option leg that doesn't parse must void the payoff (spec §5),
+    never leave a partial position under the recommended strategy's name."""
+
+    HEADER = "| Leg | Action | Strike | Expiry | Type | Price |\n|---|---|---|---|---|---|\n"
+
+    def test_strategy_bad_leg_premium_is_none(self) -> None:
+        text = (
+            "### Strategy 1: Bear Put Spread — HEDGE\n" + self.HEADER
+            + "| 1 | Buy | $11.00 | Nov 21 | Put | $2.20–$2.40 |\n"
+            + "| 2 | Sell | $8.00 | Nov 21 | Put | ~$0.80 |\n"
+        )
+        assert insights.parse_strategy(text, 11.23) is None
+
+    def test_strategy_bad_leg_action_is_none(self) -> None:
+        text = (
+            "### Strategy 1: Put Ratio Spread\n" + self.HEADER
+            + "| 1 | Buy | $11.00 | Nov 21 | Put | $2.20 |\n"
+            + "| 2 | Sell ×2 | $8.00 | Nov 21 | Put | $0.80 |\n"
+        )
+        assert insights.parse_strategy(text, 11.23) is None
+
+    def test_strategy_strike_price_header_not_used_as_premium(self) -> None:
+        text = (
+            "### Strategy 1: Collar — HEDGE\n"
+            "| Leg | Action | Strike Price | Expiration | Type | Premium |\n|---|---|---|---|---|---|\n"
+            "| 1 | Buy | $10.00 | Nov 21, 2026 | Put | ~$1.55 |\n"
+            "| 2 | Sell | $13.00 | Nov 21, 2026 | Call | ~$1.35 |\n"
+        )
+        s = insights.parse_strategy(text, 11.23)
+        assert (s["max_loss"], s["max_gain"], s["breakevens"]) == (-1.43, 1.57, [11.43])

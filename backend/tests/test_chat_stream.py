@@ -705,3 +705,18 @@ def test_stream_drops_insights_past_the_wait_budget(client, auth_headers, monkey
     resp = client.post("/chat/stream", headers=auth_headers, json={"message": "bull case for AAPL", "ticker": "AAPL"})
     names = [e["event"] for e in _parse_sse_events(resp.content)]
     assert "insights" not in names and names[-1] == "done"
+
+
+def test_stream_unserializable_insights_keeps_answer(client, auth_headers, monkeypatch):
+    # Final review: a payload json.dumps can't encode must not abort the stream before done.
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
+    monkeypatch.setattr("src.routes.chat.build_insights", lambda *a, **kw: {"ticker": "AAPL", "x": object()})
+
+    resp = client.post("/chat/stream", headers=auth_headers, json={"message": "bull case for AAPL", "ticker": "AAPL"})
+    events = _parse_sse_events(resp.content)
+    names = [e["event"] for e in events]
+
+    assert "insights" not in names and "error" not in names
+    assert "".join(e["data"] for e in events if e["event"] == "token") == "".join(_FAKE_TOKENS)
+    assert names[-1] == "done"

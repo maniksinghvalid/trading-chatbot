@@ -199,7 +199,8 @@ def parse_strategy(text: str, price: float) -> Optional[dict]:
     for header, rows in _tables(body):
         i_act, i_strike, i_type = _col(header, "action"), _col(header, "strike"), _col(header, "type")
         i_exp = _col(header, "expir")
-        i_px = next((i for i, h in enumerate(header) if "price" in h), None)
+        i_px = next((i for i, h in enumerate(header)
+                     if i != i_strike and ("price" in h or h.startswith("premium"))), None)
         if None in (i_act, i_strike, i_type, i_exp, i_px):
             continue
         legs: list[dict] = []
@@ -208,9 +209,11 @@ def parse_strategy(text: str, price: float) -> Optional[dict]:
             if len(row) != len(header):
                 continue
             action, kind = row[i_act].lower(), row[i_type].lower()
+            if "call" not in kind and "put" not in kind:
+                continue  # summary / stock rows aren't legs
             strike, premium = _num(row[i_strike]), _num(row[i_px])
             if action not in ("buy", "sell") or kind not in ("call", "put") or strike is None or premium is None:
-                continue
+                return None  # spec §5: one unparseable leg voids the payoff, never a partial position
             legs.append({"action": action, "type": kind, "strike": strike,
                          "premium": premium, "approx": "~" in row[i_px]})
             expirations.add(row[i_exp])
