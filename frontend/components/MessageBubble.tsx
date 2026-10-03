@@ -22,6 +22,7 @@
 import type { Citation, Message } from "@/lib/types";
 import CitationCard from "./CitationCard";
 import QuoteCard from "./QuoteCard";
+import InsightsPanel from "./insights/InsightsPanel";
 import StreamingMarkdown from "./StreamingMarkdown";
 
 interface MessageBubbleProps {
@@ -142,6 +143,9 @@ export default function MessageBubble({ message, isStreaming = false }: MessageB
           <span>memo</span>
         )}
       </p>
+
+      {/* Grounded report visuals — every number from report data, never the LLM */}
+      {message.insights && <InsightsPanel insights={message.insights} />}
 
       {/* Live quote card — shown above the text body (02-02) */}
       {message.quote && <QuoteCard quote={message.quote} />}
