@@ -24,6 +24,14 @@ import { streamChat } from "@/lib/api";
 import type { Citation, Message, Quote } from "@/lib/types";
 import MessageBubble from "./MessageBubble";
 
+/** Starter prompts for the empty state. Clicking one sends it immediately. */
+const SUGGESTIONS = [
+  { tag: "MARA", kind: "Analysis", prompt: "Summarize the latest full analysis on MARA" },
+  { tag: "MARA", kind: "Options", prompt: "What do the recent options reports say about MARA?" },
+  { tag: "MARA", kind: "Live quote", prompt: "What is MARA's price right now?" },
+  { tag: "NVDA", kind: "Thesis", prompt: "Bull case vs. bear case for NVDA" },
+];
+
 interface ChatWindowProps {
   /**
    * Called whenever the active session_id changes (new session or restored session),
@@ -54,7 +62,7 @@ export default function ChatWindow({
   const [sessionId, setSessionId] = useState<string | undefined>(initialSessionId);
   const [streaming, setStreaming] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // When the parent loads a new session (sidebar click), replace messages + sessionId
   useEffect(() => {
@@ -95,9 +103,9 @@ export default function ChatWindow({
    * Send the current input to the backend and stream the response.
    * Keeps sessionId across calls for multi-turn continuity.
    */
-  async function send(e?: FormEvent) {
+  async function send(e?: FormEvent, prompt?: string) {
     e?.preventDefault();
-    const text = input.trim();
+    const text = (prompt ?? input).trim();
     if (!text || streaming) return;
 
     setInput("");
@@ -188,81 +196,133 @@ export default function ChatWindow({
   }
 
   return (
-    <div className="flex flex-col h-full" style={{ minHeight: "calc(100vh - 57px)" }}>
-      {/* Message list — scrollable area */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 chat-scroll">
-        {messages.length === 0 && (
-          <div className="flex items-center justify-center h-full text-gray-500 text-sm">
-            <div className="text-center space-y-2">
-              <p className="text-gray-400 font-medium">Trading Research Chatbot</p>
-              <p>Ask a question about a ticker, e.g.</p>
-              <p className="text-blue-400 italic">"Bull case for AAPL"</p>
-              <p className="text-gray-600 text-xs mt-4">
-                Enter a ticker (optional) and ask a question; follow-ups remember
-                the last ticker. Auto-extraction is Phase 2.
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      {/* Transcript — scrollable area */}
+      <div className="chat-scroll flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-3xl px-5 pb-40 pt-10 md:px-8">
+          {messages.length === 0 && (
+            <section className="animate-rise pt-[6vh]">
+              <p className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.25em] text-amber-glow">
+                <span className="h-px w-8 bg-amber-glow/60" />
+                after-hours research desk
               </p>
-            </div>
-          </div>
-        )}
+              <h1 className="mt-5 font-display text-5xl leading-[1.02] text-paper md:text-7xl">
+                Research,
+                <br />
+                <span className="italic text-amber-glow">on the record.</span>
+              </h1>
+              <p className="mt-5 max-w-xl text-[15px] leading-relaxed text-paper-dim">
+                Ask about any ticker in your report library. Every answer is grounded in
+                your <span className="font-mono text-[13px] text-paper">TRADE-*</span> reports
+                and cites its sources — follow-ups remember the ticker you were on.
+              </p>
 
-        {messages.map((msg, i) => (
-          <MessageBubble
-            key={i}
-            message={msg}
-            // The last message is the one being streamed when streaming=true
-            isStreaming={streaming && i === messages.length - 1}
-          />
-        ))}
+              <div className="mt-10 grid gap-3 sm:grid-cols-2">
+                {SUGGESTIONS.map((s, i) => (
+                  <button
+                    key={s.prompt}
+                    type="button"
+                    onClick={() => send(undefined, s.prompt)}
+                    style={{ animationDelay: `${120 + i * 70}ms` }}
+                    className="group animate-rise relative overflow-hidden rounded-2xl border border-ink-700 bg-ink-900/60 p-4 text-left transition hover:-translate-y-0.5 hover:border-amber-glow/40 hover:bg-ink-850"
+                  >
+                    <span className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.18em]">
+                      <span className="text-amber-glow">${s.tag}</span>
+                      <span className="text-paper-mute">{s.kind}</span>
+                    </span>
+                    <span className="mt-3 block text-sm leading-snug text-paper">{s.prompt}</span>
+                    <span className="absolute bottom-3 right-4 translate-x-2 text-amber-glow opacity-0 transition group-hover:translate-x-0 group-hover:opacity-100">
+                      →
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
 
-        {/* Streaming indicator — shown only while the assistant is responding */}
-        {streaming && (
-          <div className="flex justify-start mb-4 px-1">
-            <span className="text-xs text-gray-500 animate-pulse">
-              Streaming response...
-            </span>
-          </div>
-        )}
+          {messages.map((msg, i) => (
+            <MessageBubble
+              key={i}
+              message={msg}
+              // The last message is the one being streamed when streaming=true
+              isStreaming={streaming && i === messages.length - 1}
+            />
+          ))}
 
-        {/* Invisible anchor for auto-scroll */}
-        <div ref={bottomRef} />
+          {/* Invisible anchor for auto-scroll */}
+          <div ref={bottomRef} />
+        </div>
       </div>
 
-      {/* Input area */}
-      <form
-        onSubmit={send}
-        className="border-t border-gray-800 px-4 py-3 flex gap-2 bg-gray-950"
-      >
-        {/* Ticker scope hint — optional. Kept across sends so follow-ups inherit it. */}
-        <input
-          type="text"
-          value={ticker}
-          onChange={(e) => setTicker(e.target.value.toUpperCase().trim())}
-          placeholder="Ticker"
-          maxLength={10}
-          disabled={streaming}
-          aria-label="Ticker symbol (optional)"
-          className="w-24 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed"
-          autoComplete="off"
-        />
-        <input
-          ref={inputRef}
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder={streaming ? "Waiting for response…" : "Ask about a ticker…"}
-          disabled={streaming}
-          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed"
-          autoComplete="off"
-          autoFocus
-        />
-        <button
-          type="submit"
-          disabled={streaming || !input.trim()}
-          className="bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-medium rounded-lg px-4 py-2 text-sm transition-colors"
+      {/* Composer — floating command bar */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-ink-950 via-ink-950/90 to-transparent pt-16">
+        <form
+          onSubmit={send}
+          className="pointer-events-auto mx-auto w-full max-w-3xl px-4 pb-4 md:px-8"
         >
-          {streaming ? "…" : "Send"}
-        </button>
-      </form>
+          <div className="flex items-end gap-2 rounded-2xl border border-ink-600 bg-ink-900/90 p-2 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)] backdrop-blur-xl transition focus-within:border-amber-glow/50 focus-within:shadow-[0_0_0_4px_rgba(255,181,71,0.08),0_24px_60px_-20px_rgba(0,0,0,0.9)]">
+            {/* Ticker scope hint — optional. Kept across sends so follow-ups inherit it. */}
+            <label className="flex h-10 flex-shrink-0 items-center rounded-xl border border-ink-700 bg-ink-850 pl-2.5 font-mono text-sm focus-within:border-amber-glow/50">
+              <span className={ticker ? "text-amber-glow" : "text-paper-mute"}>$</span>
+              <input
+                type="text"
+                value={ticker}
+                onChange={(e) => setTicker(e.target.value.toUpperCase().trim())}
+                placeholder="TICKER"
+                maxLength={10}
+                disabled={streaming}
+                aria-label="Ticker symbol (optional)"
+                className="w-[4.5rem] bg-transparent px-1.5 py-2 uppercase text-amber-glow placeholder:text-[11px] placeholder:tracking-widest placeholder:text-paper-mute focus:outline-none disabled:opacity-50"
+                autoComplete="off"
+              />
+            </label>
+            <textarea
+              ref={inputRef}
+              rows={1}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                // Enter sends; Shift+Enter inserts a newline; ignore IME composition.
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  send();
+                }
+              }}
+              placeholder={streaming ? "The desk is writing…" : "Ask the desk about a ticker…"}
+              disabled={streaming}
+              aria-label="Message"
+              className="composer-input max-h-40 min-h-10 flex-1 resize-none bg-transparent px-2 py-2.5 text-[15px] leading-5 text-paper placeholder:text-paper-mute focus:outline-none disabled:opacity-60"
+              autoComplete="off"
+              autoFocus
+            />
+            <button
+              type="submit"
+              disabled={streaming || !input.trim()}
+              aria-label="Send"
+              className="grid h-10 w-10 flex-shrink-0 place-items-center rounded-xl bg-amber-glow text-ink-950 transition hover:brightness-110 disabled:bg-ink-700 disabled:text-paper-mute"
+            >
+              {streaming ? (
+                <span className="flex h-4 items-end gap-[3px]" aria-hidden="true">
+                  {[0, 1, 2].map((b) => (
+                    <span
+                      key={b}
+                      className="h-full w-[3px] origin-bottom animate-bars rounded-full bg-current"
+                      style={{ animationDelay: `${b * 150}ms` }}
+                    />
+                  ))}
+                </span>
+              ) : (
+                <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
+                  <path d="M10 16V4M4.5 9.5 10 4l5.5 5.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+            </button>
+          </div>
+          <p className="mt-2 text-center font-mono text-[10px] tracking-wide text-paper-mute">
+            enter to send · shift+enter for a new line · educational research, not financial advice
+          </p>
+        </form>
+      </div>
     </div>
   );
 }

@@ -30,6 +30,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import BrandMark from "@/components/BrandMark";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
@@ -92,30 +93,34 @@ export default function AuthCallbackPage() {
   }, [router]);
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-gray-950 px-4">
-      <div className="w-full max-w-sm rounded-2xl border border-gray-800 bg-gray-900 p-8 shadow-xl text-center">
+    <main className="desk-backdrop flex min-h-dvh flex-col items-center justify-center px-4">
+      <div className="animate-rise w-full max-w-sm rounded-3xl border border-ink-700 bg-ink-900/80 p-8 text-center shadow-[0_30px_80px_-30px_rgba(0,0,0,0.9)] backdrop-blur-xl">
+        <BrandMark className="mx-auto mb-6 h-12 w-12" />
+
         {status === "loading" && (
           <>
-            <div className="mb-4 text-4xl animate-spin inline-block w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full" />
-            <p className="text-gray-300">Verifying your login link…</p>
+            <div className="mx-auto mb-4 h-7 w-7 animate-spin rounded-full border-2 border-amber-glow border-t-transparent" />
+            <p className="font-display text-2xl text-paper">Verifying your link…</p>
           </>
         )}
 
         {status === "success" && (
           <>
-            <div className="mb-4 text-4xl">✓</div>
-            <p className="text-green-300 font-medium">Logged in successfully!</p>
-            <p className="mt-1 text-sm text-gray-400">Redirecting…</p>
+            <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.25em] text-gain">● Verified</p>
+            <p className="font-display text-3xl text-paper">
+              Welcome to the <span className="italic text-amber-glow">desk.</span>
+            </p>
+            <p className="mt-2 text-sm text-paper-dim">Redirecting…</p>
           </>
         )}
 
         {status === "error" && (
           <>
-            <p className="text-red-400 font-medium">Login failed</p>
-            <p className="mt-2 text-sm text-gray-400">{errorMsg}</p>
+            <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.25em] text-loss">● Login failed</p>
+            <p className="text-sm text-paper-dim">{errorMsg}</p>
             <a
               href="/login"
-              className="mt-4 inline-block text-sm text-blue-400 hover:text-blue-300 underline"
+              className="mt-6 inline-block rounded-xl bg-amber-glow px-4 py-2.5 text-sm font-medium text-ink-950 transition hover:brightness-110"
             >
               Request a new login link
             </a>

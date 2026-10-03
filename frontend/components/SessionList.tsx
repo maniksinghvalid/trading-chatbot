@@ -40,6 +40,20 @@ function turnsToMessages(turns: SessionTurn[]): Message[] {
   }));
 }
 
+/** Tint ticker-looking words (2–5 caps) in a session title, e.g. "option stats for MARA". */
+function highlightTickers(title: string): React.ReactNode[] {
+  // split() with a capture group puts the matches at odd indexes.
+  return title.split(/\b([A-Z]{2,5})\b/).map((part, i) =>
+    i % 2 ? (
+      <span key={i} className="font-mono text-[12px] text-amber-glow/90">
+        {part}
+      </span>
+    ) : (
+      part
+    )
+  );
+}
+
 interface SessionListProps {
   /**
    * Called when the user clicks a session entry.
@@ -228,30 +242,41 @@ export default function SessionList({
       : sessions;
 
   return (
-    <aside className="w-64 flex-shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col h-full overflow-hidden">
-      <div className="px-4 py-3 border-b border-gray-800">
-        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
+    <nav className="flex min-h-0 flex-1 flex-col" aria-label="Sessions">
+      <div className="flex items-center justify-between px-5 pt-2 pb-2">
+        <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-paper-mute">
           Sessions
         </p>
+        {!loading && displaySessions.length > 0 && (
+          <span className="font-mono text-[10px] text-paper-mute">
+            {String(displaySessions.length).padStart(2, "0")}
+          </span>
+        )}
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto px-2.5 pb-3">
         {loading && (
-          <p className="text-xs text-gray-500 px-4 py-3 animate-pulse">
-            Loading sessions…
-          </p>
+          <div className="space-y-1.5 px-1 pt-1" aria-label="Loading sessions">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="h-9 animate-pulse rounded-lg bg-ink-800/70" />
+            ))}
+          </div>
         )}
 
         {!loading && error && (
-          <p className="text-xs text-red-400 px-4 py-3 break-words">{error}</p>
+          <p className="mx-1 rounded-lg border border-loss/30 bg-loss/10 px-3 py-2 text-xs text-loss break-words">
+            {error}
+          </p>
         )}
 
         {!loading && !error && displaySessions.length === 0 && (
-          <p className="text-xs text-gray-600 px-4 py-3">No sessions yet.</p>
+          <p className="px-3 py-2 text-xs text-paper-mute">
+            No sessions yet. Your research trail will appear here.
+          </p>
         )}
 
         {!loading &&
-          displaySessions.map((s) => {
+          displaySessions.map((s, i) => {
             const isActive = s.session_id === activeSessionId;
             const isLoadingThis = s.session_id === loadingSessionId;
 
@@ -260,25 +285,33 @@ export default function SessionList({
                 key={s.session_id}
                 onClick={() => handleSelect(s.session_id)}
                 disabled={!!loadingSessionId}
-                className={`w-full text-left px-4 py-2.5 text-sm border-b border-gray-800 transition-colors
+                className={`group relative mb-0.5 flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition
                   ${isActive
-                    ? "bg-gray-700 text-white"
-                    : "text-gray-300 hover:bg-gray-800 hover:text-white"
+                    ? "bg-ink-800 text-paper"
+                    : "text-paper-dim hover:bg-ink-850 hover:text-paper"
                   }
                   disabled:cursor-wait`}
                 title={s.title}
               >
-                <span className="block truncate">
+                {isActive && (
+                  <span className="absolute left-0 top-2 bottom-2 w-[2px] rounded-full bg-amber-glow shadow-[0_0_10px_#ffb547]" />
+                )}
+                <span
+                  className={`font-mono text-[10px] tabular-nums ${isActive ? "text-amber-glow" : "text-paper-mute"}`}
+                >
+                  {String(i + 1).padStart(2, "0")}
+                </span>
+                <span className="block min-w-0 flex-1 truncate">
                   {isLoadingThis ? (
-                    <span className="text-gray-500 animate-pulse">Loading…</span>
+                    <span className="animate-pulse text-paper-mute">Loading…</span>
                   ) : (
-                    s.title || "(untitled)"
+                    highlightTickers(s.title || "(untitled)")
                   )}
                 </span>
               </button>
             );
           })}
       </div>
-    </aside>
+    </nav>
   );
 }

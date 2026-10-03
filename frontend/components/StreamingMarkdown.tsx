@@ -19,7 +19,7 @@
  * LLM output cannot inject executable HTML/JS into the DOM.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { Children, useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import TickerChip from "./TickerChip";
@@ -44,25 +44,33 @@ interface StreamingMarkdownProps {
 }
 
 /**
- * Split plain text into segments wrapping detected ticker symbols in TickerChip.
- * Identical helper to the one in MessageBubble — duplicated here so StreamingMarkdown
- * is a self-contained component with no cross-component dependency.
+ * Split plain text into segments, wrapping detected ticker symbols in TickerChip
+ * and "[n]" citation markers in a small index badge (matches the source tiles).
+ * Plain strings only — no raw HTML (T-06-01).
  */
-function renderWithTickerChips(
-  text: string,
-  tickers: Set<string>
-): React.ReactNode[] {
-  if (tickers.size === 0) return [text];
-  const sorted = [...tickers].sort((a, b) => b.length - a.length);
-  const pattern = sorted.map((t) => `\\b${t}\\b`).join("|");
-  const re = new RegExp(`(${pattern})`, "g");
-  const parts = text.split(re);
-  return parts.map((part, i) =>
-    tickers.has(part) ? (
-      <TickerChip key={`${part}-${i}`} ticker={part} />
-    ) : (
-      part
-    )
+function enhanceText(text: string, tickers: Set<string>): ReactNode[] {
+  const alts = [...tickers].sort((a, b) => b.length - a.length).map((t) => `\\b${t}\\b`);
+  alts.push("\\[\\d+\\]");
+  // split() with one capture group puts the matches at odd indexes.
+  return text.split(new RegExp(`(${alts.join("|")})`, "g")).map((part, i) => {
+    if (i % 2 === 0) return part;
+    if (tickers.has(part)) return <TickerChip key={i} ticker={part} />;
+    return (
+      <span
+        key={i}
+        className="mx-0.5 inline-grid h-[1.4em] min-w-[1.4em] place-items-center rounded-[5px] border border-ink-600 bg-ink-800 px-1 align-[0.12em] font-mono text-[0.68em] leading-none text-paper-dim"
+        aria-label={`Source ${part.slice(1, -1)}`}
+      >
+        {part.slice(1, -1)}
+      </span>
+    );
+  });
+}
+
+/** Apply enhanceText to every direct string child of a markdown node. */
+function enhance(children: ReactNode, tickers: Set<string>): ReactNode {
+  return Children.map(children, (child) =>
+    typeof child === "string" ? enhanceText(child, tickers) : child
   );
 }
 
@@ -103,50 +111,57 @@ export default function StreamingMarkdown({
   }, [content, streaming]);
 
   return (
-    <div className="text-sm leading-relaxed break-words">
+    <div
+      className={`break-words text-[15px] leading-7 text-paper/90 ${streaming ? "md-streaming" : ""}`}
+    >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          // Headings — explicit spacing/size since @tailwindcss/typography isn't installed
+          // Headings — editorial serif for h1/h2, amber eyebrow for h3
           h1: ({ children }) => (
-            <h1 className="text-lg font-bold text-white mt-4 mb-2 first:mt-0">{children}</h1>
+            <h1 className="mb-3 mt-7 font-display text-3xl leading-tight text-paper first:mt-0">
+              {children}
+            </h1>
           ),
           h2: ({ children }) => (
-            <h2 className="text-base font-bold text-white mt-4 mb-2 first:mt-0">{children}</h2>
+            <h2 className="mb-2.5 mt-7 font-display text-[26px] leading-tight text-paper first:mt-0">
+              {children}
+            </h2>
           ),
           h3: ({ children }) => (
-            <h3 className="text-sm font-semibold text-gray-100 mt-3 mb-1.5 first:mt-0">{children}</h3>
+            <h3 className="mb-2 mt-6 text-[12px] font-semibold uppercase tracking-[0.14em] text-amber-glow/90 first:mt-0">
+              {children}
+            </h3>
           ),
-          // Lists — restore markers + vertical rhythm
           ul: ({ children }) => (
-            <ul className="list-disc pl-5 my-2 space-y-1">{children}</ul>
+            <ul className="my-3 list-disc space-y-1.5 pl-5 marker:text-amber-glow/60">{children}</ul>
           ),
           ol: ({ children }) => (
-            <ol className="list-decimal pl-5 my-2 space-y-1">{children}</ol>
+            <ol className="my-3 list-decimal space-y-1.5 pl-6 marker:font-mono marker:text-[0.85em] marker:text-amber-glow/80">
+              {children}
+            </ol>
           ),
-          li: ({ children }) => <li className="leading-relaxed">{children}</li>,
-          strong: ({ children }) => (
-            <strong className="font-semibold text-white">{children}</strong>
-          ),
-          hr: () => <hr className="my-3 border-gray-700" />,
+          li: ({ children }) => <li className="pl-1 leading-7">{enhance(children, tickers)}</li>,
+          strong: ({ children }) => <strong className="font-semibold text-paper">{children}</strong>,
+          hr: () => <hr className="my-6 border-dashed border-ink-600" />,
           blockquote: ({ children }) => (
-            <blockquote className="border-l-2 border-gray-600 pl-3 my-2 text-gray-300 italic">
+            <blockquote className="my-4 border-l-2 border-amber-glow/50 pl-4 font-display text-xl italic leading-snug text-paper-dim">
               {children}
             </blockquote>
           ),
           // GFM tables
           table: ({ children }) => (
-            <div className="my-2 overflow-x-auto">
-              <table className="w-full text-xs border-collapse">{children}</table>
+            <div className="my-4 overflow-x-auto rounded-xl border border-ink-700">
+              <table className="w-full border-collapse text-[13px] tabular-nums">{children}</table>
             </div>
           ),
           th: ({ children }) => (
-            <th className="border border-gray-700 px-2 py-1 text-left font-semibold bg-gray-900/60">
+            <th className="bg-ink-850 px-3 py-2 text-left font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-paper-dim">
               {children}
             </th>
           ),
           td: ({ children }) => (
-            <td className="border border-gray-700 px-2 py-1 align-top">{children}</td>
+            <td className="border-t border-ink-700 px-3 py-2 align-top">{enhance(children, tickers)}</td>
           ),
           // Override anchor to open in new tab safely (T-06-01)
           a: ({ href, children }) => (
@@ -154,7 +169,7 @@ export default function StreamingMarkdown({
               href={href}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-blue-400 underline"
+              className="text-amber-glow underline decoration-amber-glow/40 underline-offset-2 hover:decoration-amber-glow"
             >
               {children}
             </a>
@@ -164,42 +179,27 @@ export default function StreamingMarkdown({
             const isInline = !className;
             return isInline ? (
               <code
-                className="bg-gray-700 px-1 py-0.5 rounded text-xs font-mono"
+                className="rounded-md border border-ink-700 bg-ink-800 px-1.5 py-0.5 font-mono text-[0.85em] text-amber-glow/90"
                 {...props}
               >
                 {children}
               </code>
             ) : (
               <code
-                className={`block bg-gray-900 p-3 rounded text-xs font-mono overflow-x-auto ${className ?? ""}`}
+                className={`my-3 block overflow-x-auto rounded-xl border border-ink-700 bg-ink-900 p-4 font-mono text-xs ${className ?? ""}`}
                 {...props}
               >
                 {children}
               </code>
             );
           },
-          // Override paragraph to inject TickerChips for detected tickers.
-          // Plain text strings are split by the ticker regex; no raw HTML is used (T-06-01).
-          p: ({ children }) => {
-            if (tickers.size === 0) {
-              return <p className="my-2 leading-relaxed first:mt-0 last:mb-0">{children}</p>;
-            }
-            const enhanced = Array.isArray(children)
-              ? children.flatMap((child, i) =>
-                  typeof child === "string"
-                    ? renderWithTickerChips(child, tickers).map((node, j) => (
-                        <span key={`tc-${i}-${j}`}>{node}</span>
-                      ))
-                    : [<span key={`pass-${i}`}>{child}</span>]
-                )
-              : typeof children === "string"
-              ? renderWithTickerChips(children, tickers)
-              : children;
-            return <p className="my-2 leading-relaxed first:mt-0 last:mb-0">{enhanced}</p>;
-          },
+          // Paragraphs get ticker chips + citation badges. Plain text only (T-06-01).
+          p: ({ children }) => (
+            <p className="my-3 first:mt-0 last:mb-0">{enhance(children, tickers)}</p>
+          ),
         }}
       >
-        {displayedContent || "■"}
+        {displayedContent}
       </ReactMarkdown>
     </div>
   );

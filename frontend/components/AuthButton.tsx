@@ -39,14 +39,20 @@ export default function AuthButton() {
 
   if (email) {
     return (
-      <div className="ml-auto flex items-center gap-3">
-        <span className="text-xs text-gray-400 hidden sm:block">{email}</span>
+      <div className="ml-auto flex items-center gap-2.5">
+        <span className="hidden text-xs text-paper-dim sm:block">{email}</span>
+        <span
+          className="grid h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-amber-glow to-amber-deep font-display text-base text-ink-950"
+          aria-hidden="true"
+        >
+          {email[0]?.toUpperCase()}
+        </span>
         <button
           onClick={() => {
             localStorage.removeItem("access_token");
             window.location.href = "/login";
           }}
-          className="rounded-lg bg-gray-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-600 transition-colors"
+          className="rounded-lg border border-ink-600 px-3 py-1.5 text-xs font-medium text-paper-dim transition hover:border-loss/50 hover:text-loss"
         >
           Log out
         </button>
@@ -57,7 +63,7 @@ export default function AuthButton() {
   return (
     <a
       href="/login"
-      className="ml-auto rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-500 transition-colors"
+      className="ml-auto rounded-lg bg-amber-glow px-4 py-1.5 text-sm font-medium text-ink-950 transition hover:brightness-110"
     >
       Log in
     </a>

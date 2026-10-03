@@ -25,9 +25,9 @@ function formatPrice(n: number): string {
   return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-/** Format volume with comma separators. */
+/** Format volume compactly, e.g. 48.2M. */
 function formatVolume(n: number): string {
-  return n.toLocaleString("en-US");
+  return n.toLocaleString("en-US", { notation: "compact", maximumFractionDigits: 1 });
 }
 
 /** Format an ISO timestamp into a human-readable local time. */
@@ -46,34 +46,45 @@ function formatTimestamp(iso: string): string {
 export default function QuoteCard({ quote }: QuoteCardProps) {
   const isPositive = quote.day_change_pct >= 0;
   const changeSign = isPositive ? "+" : "";
-  const changeColor = isPositive ? "text-green-400" : "text-red-400";
+  const tone = isPositive
+    ? { text: "text-gain", pill: "bg-gain/15 border-gain/30", glow: "from-gain/20", arrow: "▲" }
+    : { text: "text-loss", pill: "bg-loss/15 border-loss/30", glow: "from-loss/20", arrow: "▼" };
 
   return (
-    <div className="rounded-xl border border-blue-800 bg-blue-950/40 px-4 py-3 mb-3 text-sm">
-      {/* Header row */}
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-xs font-semibold text-blue-300 uppercase tracking-wide">
-          Live Quote
-        </span>
-        <span className="text-xs text-gray-500">
-          ~15 min delayed &bull; {quote.source}
-        </span>
-      </div>
+    <div className="relative mb-5 overflow-hidden rounded-2xl border border-ink-600 bg-ink-900">
+      {/* Direction-tinted wash */}
+      <div className={`pointer-events-none absolute inset-0 bg-gradient-to-br ${tone.glow} via-transparent to-transparent`} />
 
-      {/* Price row */}
-      <div className="flex items-baseline gap-3">
-        <span className="text-2xl font-bold text-white">
-          ${formatPrice(quote.price)}
-        </span>
-        <span className={`text-sm font-medium ${changeColor}`}>
-          {changeSign}{quote.day_change_pct.toFixed(2)}%
-        </span>
-      </div>
+      <div className="relative px-5 py-4">
+        <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.2em]">
+          <span className="flex items-center gap-1.5 text-paper-dim">
+            <span className={`h-1.5 w-1.5 animate-pulse rounded-full ${isPositive ? "bg-gain" : "bg-loss"}`} />
+            Live quote
+          </span>
+          <span className="text-paper-mute">~15 min delayed · {quote.source}</span>
+        </div>
 
-      {/* Secondary row: volume + timestamp */}
-      <div className="flex items-center gap-4 mt-1.5 text-xs text-gray-400">
-        <span>Vol: {formatVolume(quote.volume)}</span>
-        <span>As of {formatTimestamp(quote.timestamp)}</span>
+        <div className="mt-3 flex flex-wrap items-baseline gap-x-4 gap-y-2">
+          <span className="font-mono text-4xl font-semibold tracking-tight tabular-nums text-paper">
+            <span className="mr-0.5 text-2xl text-paper-mute">$</span>
+            {formatPrice(quote.price)}
+          </span>
+          <span
+            className={`rounded-full border px-2.5 py-0.5 font-mono text-sm font-medium tabular-nums ${tone.text} ${tone.pill}`}
+          >
+            {tone.arrow} {changeSign}
+            {quote.day_change_pct.toFixed(2)}%
+          </span>
+        </div>
+
+        <div className="mt-3 flex gap-6 border-t border-ink-700/80 pt-3 font-mono text-[11px] text-paper-mute">
+          <span>
+            VOL <span className="text-paper-dim">{formatVolume(quote.volume)}</span>
+          </span>
+          <span>
+            AS OF <span className="text-paper-dim">{formatTimestamp(quote.timestamp)}</span>
+          </span>
+        </div>
       </div>
     </div>
   );

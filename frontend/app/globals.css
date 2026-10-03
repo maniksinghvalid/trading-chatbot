@@ -2,23 +2,36 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Night Desk — dark-only by design (a trading terminal after hours). */
 :root {
-  --foreground-rgb: 0, 0, 0;
-  --background-start-rgb: 214, 219, 220;
-  --background-end-rgb: 255, 255, 255;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --foreground-rgb: 255, 255, 255;
-    --background-start-rgb: 0, 0, 0;
-    --background-end-rgb: 0, 0, 0;
-  }
+  color-scheme: dark;
 }
 
 body {
-  color: rgb(var(--foreground-rgb));
-  background: rgb(var(--background-end-rgb));
+  background-color: #06070a;
+  color: #ece6d9;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Graph-paper backdrop + a low amber sun on the horizon. Pure CSS, no assets. */
+.desk-backdrop {
+  background-image:
+    radial-gradient(1200px 500px at 70% -10%, rgba(255, 181, 71, 0.10), transparent 60%),
+    radial-gradient(900px 600px at -10% 110%, rgba(61, 220, 151, 0.05), transparent 60%),
+    linear-gradient(rgba(236, 230, 217, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(236, 230, 217, 0.035) 1px, transparent 1px);
+  background-size: auto, auto, 48px 48px, 48px 48px;
+}
+
+/* Film grain so the flat ink doesn't look like a default dark theme. */
+.desk-grain::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.06;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
 /* Smooth auto-scroll for the message list */
@@ -26,8 +39,48 @@ body {
   scroll-behavior: smooth;
 }
 
-/* Prose overrides for ReactMarkdown in dark mode */
-.prose pre {
-  background-color: #1e293b;
-  color: #e2e8f0;
+/* Quiet scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a3142 transparent;
+}
+
+/* Composer grows with its content where supported; fixed height elsewhere. */
+.composer-input {
+  field-sizing: content;
+}
+
+/* Blinking amber caret at the end of a streaming answer. */
+.md-streaming > :is(p, h1, h2, h3, blockquote):last-child::after,
+.md-streaming > :is(ul, ol):last-child > li:last-child::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 1.05em;
+  margin-left: 3px;
+  vertical-align: -0.15em;
+  background: #ffb547;
+  box-shadow: 0 0 10px #ffb547;
+  animation: caret 1s steps(1) infinite;
+}
+
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+::selection {
+  background: rgba(255, 181, 71, 0.35);
+  color: #fff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
 }

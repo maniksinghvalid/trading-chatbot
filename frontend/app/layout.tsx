@@ -1,11 +1,18 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import { Geist, Instrument_Serif, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
-const inter = Inter({ subsets: ["latin"] });
+const sans = Geist({ subsets: ["latin"], variable: "--font-sans" });
+const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono" });
+const display = Instrument_Serif({
+  subsets: ["latin"],
+  weight: "400",
+  style: ["normal", "italic"],
+  variable: "--font-display",
+});
 
 export const metadata: Metadata = {
-  title: "Trading Chatbot",
+  title: "Night Desk · Trading Research",
   description: "AI-powered trading research chatbot with Pinecone RAG",
 };
 
@@ -15,8 +22,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className={`${inter.className} bg-gray-950 text-gray-100 min-h-screen`}>
+    <html lang="en" className={`${sans.variable} ${mono.variable} ${display.variable}`}>
+      <body className="font-sans bg-ink-950 text-paper min-h-screen desk-grain">
         {children}
       </body>
     </html>

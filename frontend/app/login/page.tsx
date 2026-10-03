@@ -19,8 +19,60 @@
  */
 
 import { useState, FormEvent } from "react";
+import BrandMark from "@/components/BrandMark";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+
+/**
+ * Decorative candlestick skyline for the hero — a deterministic wave, not market
+ * data (no labels, no axes). Rounded so server and browser Math.sin agree
+ * (last-digit float drift otherwise trips a hydration mismatch).
+ */
+const r = (v: number) => Math.round(v);
+const CANDLES = Array.from({ length: 34 }, (_, i) => {
+  const base = 40 + Math.sin(i / 3.2) * 14 + i * 2.1;
+  const open = r(base + Math.sin(i * 1.7) * 6);
+  const close = r(base + Math.cos(i * 1.3) * 7);
+  return {
+    open,
+    close,
+    high: Math.max(open, close) + 3 + (i % 3) * 2,
+    low: Math.min(open, close) - 3 - (i % 4) * 2,
+  };
+});
+
+function Skyline() {
+  return (
+    <svg viewBox="0 0 340 170" className="w-full" aria-hidden="true" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="sky-fade" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stopColor="#ffb547" stopOpacity="0.15" />
+          <stop offset="1" stopColor="#ffb547" stopOpacity="1" />
+        </linearGradient>
+      </defs>
+      {CANDLES.map((c, i) => {
+        const x = 6 + i * 10;
+        const up = c.close >= c.open;
+        const y = (v: number) => 170 - v;
+        return (
+          <g key={i} opacity={0.25 + (i / CANDLES.length) * 0.75}>
+            <line x1={x} x2={x} y1={y(c.high)} y2={y(c.low)} stroke={up ? "#ffb547" : "#6d6a63"} strokeWidth="1" />
+            <rect
+              x={x - 3}
+              width="6"
+              y={y(Math.max(c.open, c.close))}
+              height={Math.max(2, Math.abs(c.close - c.open))}
+              rx="1"
+              fill={up ? "url(#sky-fade)" : "#2a3142"}
+              stroke={up ? "none" : "#6d6a63"}
+              strokeWidth="0.75"
+            />
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -57,48 +109,100 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-gray-950 px-4">
-      <div className="w-full max-w-sm rounded-2xl border border-gray-800 bg-gray-900 p-8 shadow-xl">
-        <h1 className="mb-2 text-2xl font-bold text-white">Trading Chatbot</h1>
-        <p className="mb-6 text-sm text-gray-400">
-          Enter your email to receive a login link.
-        </p>
+    <main className="desk-backdrop grid min-h-dvh lg:grid-cols-[1.15fr_1fr]">
+      {/* Hero */}
+      <section className="relative hidden flex-col justify-between overflow-hidden border-r border-ink-700/70 p-12 lg:flex">
+        <div className="flex items-center gap-3">
+          <BrandMark className="h-10 w-10" />
+          <span className="font-display text-2xl">
+            Night <span className="italic text-amber-glow">Desk</span>
+          </span>
+        </div>
 
-        {status === "sent" ? (
-          <div className="rounded-lg bg-green-900/30 border border-green-700 px-4 py-3 text-green-300 text-sm">
-            Check your inbox — we sent a login link to{" "}
-            <span className="font-medium">{email}</span>. It expires in 15
-            minutes.
+        <div className="animate-rise">
+          <p className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.25em] text-amber-glow">
+            <span className="h-px w-8 bg-amber-glow/60" />
+            trading research, grounded
+          </p>
+          <h1 className="mt-5 max-w-xl font-display text-7xl leading-[0.98] text-paper">
+            Your reports,
+            <br />
+            <span className="italic text-amber-glow">in conversation.</span>
+          </h1>
+          <p className="mt-6 max-w-md text-[15px] leading-relaxed text-paper-dim">
+            Ask questions across every analysis, options and technical report you have
+            filed. Each answer cites the memo it came from.
+          </p>
+        </div>
+
+        <div className="-mx-12 -mb-12 opacity-90">
+          <Skyline />
+        </div>
+      </section>
+
+      {/* Form */}
+      <section className="flex items-center justify-center px-5 py-12">
+        <div className="animate-rise w-full max-w-sm">
+          <div className="mb-10 flex items-center gap-3 lg:hidden">
+            <BrandMark />
+            <span className="font-display text-2xl">
+              Night <span className="italic text-amber-glow">Desk</span>
+            </span>
           </div>
-        ) : (
-          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-            <label className="flex flex-col gap-1">
-              <span className="text-sm text-gray-300">Email address</span>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com"
-                required
-                disabled={status === "loading"}
-                className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
-              />
-            </label>
 
-            {status === "error" && (
-              <p className="text-sm text-red-400">{errorMsg}</p>
-            )}
+          <p className="font-mono text-[10px] uppercase tracking-[0.25em] text-paper-mute">
+            Sign in
+          </p>
+          <h2 className="mt-2 font-display text-4xl text-paper">Open the desk.</h2>
+          <p className="mb-8 mt-2 text-sm text-paper-dim">
+            We&apos;ll email you a one-time login link — no password needed.
+          </p>
 
-            <button
-              type="submit"
-              disabled={status === "loading" || !email.trim()}
-              className="rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
-            >
-              {status === "loading" ? "Sending…" : "Send login link"}
-            </button>
-          </form>
-        )}
-      </div>
+          {status === "sent" ? (
+            <div className="rounded-2xl border border-gain/30 bg-gain/10 p-5 text-sm leading-relaxed text-paper">
+              <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.2em] text-gain">
+                ● Link sent
+              </p>
+              Check your inbox — we sent a login link to{" "}
+              <span className="font-medium text-gain">{email}</span>. It expires in 15 minutes.
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+              <label className="flex flex-col gap-2">
+                <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-paper-mute">
+                  Email address
+                </span>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  required
+                  disabled={status === "loading"}
+                  className="rounded-xl border border-ink-600 bg-ink-900/80 px-4 py-3 text-paper placeholder:text-paper-mute transition focus:border-amber-glow/60 focus:outline-none focus:ring-4 focus:ring-amber-glow/10 disabled:opacity-50"
+                />
+              </label>
+
+              {status === "error" && <p className="text-sm text-loss">{errorMsg}</p>}
+
+              <button
+                type="submit"
+                disabled={status === "loading" || !email.trim()}
+                className="group flex items-center justify-center gap-2 rounded-xl bg-amber-glow px-4 py-3 font-medium text-ink-950 transition hover:brightness-110 focus:outline-none focus:ring-4 focus:ring-amber-glow/25 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {status === "loading" ? "Sending…" : "Send login link"}
+                <span className="transition group-hover:translate-x-0.5" aria-hidden="true">
+                  →
+                </span>
+              </button>
+            </form>
+          )}
+
+          <p className="mt-10 text-[11px] leading-relaxed text-paper-mute">
+            Educational research only. Nothing here is financial advice.
+          </p>
+        </div>
+      </section>
     </main>
   );
 }

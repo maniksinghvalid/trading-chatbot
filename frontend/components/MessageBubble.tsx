@@ -14,6 +14,9 @@
  * - Assistant messages with a quote show a QuoteCard above the text body.
  * - Citations render as expandable CitationCards instead of the flat list.
  * - Ticker symbols detected in assistant content are wrapped in TickerChip.
+ *
+ * Night Desk layout: user turns render as serif "headlines"; assistant turns
+ * render as memos hanging off a timeline rule, with source tiles beneath.
  */
 
 import type { Citation, Message } from "@/lib/types";
@@ -55,18 +58,20 @@ function detectTickers(content: string, citations: Citation[]): Set<string> {
 }
 
 /**
- * Citations section rendered below assistant bubbles.
- * Each citation renders as an expandable CitationCard.
+ * Citations section rendered below assistant answers.
+ * Each citation renders as an expandable CitationCard tile.
  */
 function Citations({ citations }: { citations: Citation[] }) {
   if (!citations || citations.length === 0) return null;
 
   return (
-    <div className="mt-3 pt-3 border-t border-gray-700">
-      <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">
+    <div className="mt-6">
+      <p className="mb-2.5 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.22em] text-paper-mute">
         Sources
+        <span className="h-px flex-1 bg-ink-700" />
+        <span className="tabular-nums">{String(citations.length).padStart(2, "0")}</span>
       </p>
-      <div className="space-y-1.5">
+      <div className="grid gap-2 sm:grid-cols-2">
         {citations.map((c, i) => (
           <CitationCard key={`${c.source_path}-${i}`} citation={c} index={i} />
         ))}
@@ -75,49 +80,89 @@ function Citations({ citations }: { citations: Citation[] }) {
   );
 }
 
+/** Equalizer bars — the desk's "working" glyph. */
+function Bars() {
+  return (
+    <span className="flex h-3 items-end gap-[2px]" aria-hidden="true">
+      {[0, 1, 2, 3].map((b) => (
+        <span
+          key={b}
+          className="h-full w-[2px] origin-bottom animate-bars rounded-full bg-amber-glow"
+          style={{ animationDelay: `${b * 120}ms` }}
+        />
+      ))}
+    </span>
+  );
+}
+
 export default function MessageBubble({ message, isStreaming = false }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const citations = message.citations ?? [];
   const tickers = isUser ? new Set<string>() : detectTickers(message.content, citations);
 
-  return (
-    <div
-      className={`flex w-full ${isUser ? "justify-end" : "justify-start"} mb-4`}
-    >
-      <div
-        className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
-          isUser
-            ? "bg-blue-600 text-white rounded-br-sm"
-            : "bg-gray-800 text-gray-100 rounded-bl-sm"
-        }`}
-      >
-        {/* Live quote card — shown above the text body for assistant messages (02-02) */}
-        {!isUser && message.quote && (
-          <QuoteCard quote={message.quote} />
-        )}
-
-        {/*
-          Assistant messages use StreamingMarkdown for debounced incremental rendering
-          (smooth token streaming, flush on completion). User messages are static —
-          rendered through the same safe ReactMarkdown config inside StreamingMarkdown.
-          T-06-01: StreamingMarkdown uses no rehype-raw, no dangerouslySetInnerHTML.
-        */}
-        {isUser ? (
-          /* User bubbles: static plain text — no markdown parsing needed */
-          <p className="whitespace-pre-wrap">{message.content}</p>
-        ) : (
-          <StreamingMarkdown
-            content={message.content}
-            streaming={isStreaming}
-            tickers={tickers}
-          />
-        )}
-
-        {/* Citations — only rendered for assistant messages with citations */}
-        {!isUser && citations.length > 0 && (
-          <Citations citations={citations} />
-        )}
+  // The user's question reads as the headline of a research note.
+  if (isUser) {
+    return (
+      <div className="animate-rise mt-14 first:mt-0">
+        <p className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.22em] text-paper-mute">
+          <span className="text-amber-glow">›</span> You asked
+        </p>
+        <p className="mt-1.5 whitespace-pre-wrap font-display text-[26px] leading-[1.15] text-paper md:text-[30px]">
+          {message.content}
+        </p>
       </div>
-    </div>
+    );
+  }
+
+  const waiting = isStreaming && message.content === "";
+
+  return (
+    <article className="animate-rise relative mt-5 border-l border-ink-600 pb-2 pl-6">
+      {/* Timeline node — glows while the desk is writing */}
+      <span
+        className={`absolute -left-[5px] top-[3px] h-[9px] w-[9px] rotate-45 rounded-[2px] ${
+          isStreaming ? "bg-amber-glow shadow-[0_0_12px_#ffb547] animate-pulse" : "bg-ink-600"
+        }`}
+        aria-hidden="true"
+      />
+
+      <p className="mb-3 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.22em] text-paper-mute">
+        <span className="text-paper-dim">Desk</span>
+        <span>·</span>
+        {isStreaming ? (
+          <span className="flex items-center gap-2 text-amber-glow">
+            <Bars />
+            {waiting
+              ? citations.length > 0
+                ? `reading ${citations.length} source${citations.length === 1 ? "" : "s"}`
+                : "pulling sources"
+              : "writing"}
+          </span>
+        ) : (
+          <span>memo</span>
+        )}
+      </p>
+
+      {/* Live quote card — shown above the text body (02-02) */}
+      {message.quote && <QuoteCard quote={message.quote} />}
+
+      {/*
+        StreamingMarkdown handles debounced incremental rendering (smooth token
+        streaming, flush on completion).
+        T-06-01: StreamingMarkdown uses no rehype-raw, no dangerouslySetInnerHTML.
+      */}
+      {waiting ? (
+        <div className="space-y-2.5 py-1" aria-label="Waiting for response">
+          {["w-11/12", "w-9/12", "w-10/12"].map((w) => (
+            <div key={w} className={`h-3 ${w} animate-pulse rounded bg-ink-800`} />
+          ))}
+        </div>
+      ) : (
+        <StreamingMarkdown content={message.content} streaming={isStreaming} tickers={tickers} />
+      )}
+
+      {/* Citations */}
+      {citations.length > 0 && <Citations citations={citations} />}
+    </article>
   );
 }

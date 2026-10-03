@@ -22,10 +22,10 @@ interface TickerChipProps {
 export default function TickerChip({ ticker }: TickerChipProps) {
   return (
     <span
-      className="inline-block bg-blue-900/50 text-blue-300 text-xs font-mono font-semibold
-                 px-1.5 py-0.5 rounded border border-blue-700/50 mx-0.5 align-baseline"
+      className="mx-0.5 inline-flex items-baseline rounded-md border border-amber-glow/25 bg-amber-glow/[0.08] px-1.5 font-mono text-[0.82em] font-semibold text-amber-glow"
       aria-label={`Ticker: ${ticker}`}
     >
+      <span className="mr-px opacity-50">$</span>
       {ticker}
     </span>
   );
