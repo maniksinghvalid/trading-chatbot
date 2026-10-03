@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
+from typing import Any, Optional
+
+import src.pinecone_client as pc
 
 logger = logging.getLogger(__name__)
 
@@ -227,3 +229,124 @@ def parse_strategy(text: str, price: float) -> Optional[dict]:
         "legs": legs,
         **payoff(legs, price, includes_stock),
     }
+
+
+# Mirrors the scoring contract (README / trade/SKILL.md): 25/25/20/15/15.
+_DIMENSIONS = (
+    ("Technical", "technical_score", 0.25),
+    ("Fundamental", "fundamental_score", 0.25),
+    ("Sentiment", "sentiment_score", 0.20),
+    ("Risk", "risk_score", 0.15),
+    ("Thesis", "thesis_score", 0.15),
+)
+
+
+def _is_num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _source(meta: dict) -> dict:
+    return {"source_path": meta.get("source_path", ""), "generated_date": meta.get("generated_date", "")}
+
+
+def score_card(meta: dict) -> Optional[dict]:
+    if not _is_num(meta.get("composite_score")):
+        return None
+    return {
+        "composite": meta["composite_score"],
+        "grade": meta.get("grade"),
+        "signal": meta.get("signal"),
+        "dimensions": [
+            {"name": name, "score": meta[key], "weight": weight}
+            for name, key, weight in _DIMENSIONS
+            if _is_num(meta.get(key))
+        ],
+        "price": meta["price_at_analysis"] if _is_num(meta.get("price_at_analysis")) else None,
+        "stop_loss": meta["stop_loss"] if _is_num(meta.get("stop_loss")) else None,
+        "catalyst_date": meta.get("nearest_catalyst_date") or None,
+        "source": _source(meta),
+    }
+
+
+def trend(analysis_runs: list[dict], options_runs: list[dict], focus: bool) -> Optional[dict]:
+    """One point per date (runs arrive oldest → newest, so the day's latest wins);
+    ANALYSIS price/signal override OPTIONS on shared dates."""
+    points: dict[str, dict] = {}
+    for m in options_runs:
+        d = m.get("generated_date")
+        if not d:
+            continue
+        p = points.setdefault(d, {"date": d})
+        if _is_num(m.get("price_at_analysis")):
+            p["price"] = m["price_at_analysis"]
+        if _is_num(m.get("iv_rank")):
+            p["iv_rank"] = m["iv_rank"]
+        if m.get("signal"):
+            p["signal"] = m["signal"]
+    for m in analysis_runs:
+        d = m.get("generated_date")
+        if not d:
+            continue
+        p = points.setdefault(d, {"date": d})
+        if _is_num(m.get("price_at_analysis")):
+            p["price"] = m["price_at_analysis"]
+        if _is_num(m.get("composite_score")):
+            p["score"] = m["composite_score"]
+        if m.get("signal"):
+            p["signal"] = m["signal"]
+    series = [points[d] for d in sorted(points)][-60:]
+    return {"points": series, "focus": focus} if len(series) >= 2 else None
+
+
+def build_insights(ticker: Optional[str], context_types: set, intent: str) -> Optional[dict]:
+    """Grounded visual payload for an answer about `ticker` (spec §4.3). Never raises:
+    each section is built in isolation and dropped (with a warning) on failure."""
+    if not ticker:
+        return None
+    trajectory = intent == "trajectory"
+    if not (trajectory or {"ANALYSIS", "OPTIONS"} & set(context_types)):
+        return None
+    out: dict[str, Any] = {}
+
+    def safe(name: str, build) -> Any:
+        try:
+            return build()
+        except Exception as exc:
+            logger.warning("insights: %s failed for %s: %s", name, ticker, exc)
+            return None
+
+    def section(name: str, build) -> None:
+        value = safe(name, build)
+        if value:
+            out[name] = value
+
+    def sourced(value: Optional[dict], src: dict) -> Optional[dict]:
+        return {**value, "source": src} if value else None
+
+    runs = {
+        rt: safe(f"{rt} runs", lambda rt=rt: pc.run_metadata(ticker, rt)) or []
+        for rt in ("ANALYSIS", "OPTIONS")
+    }
+
+    if "ANALYSIS" in context_types and runs["ANALYSIS"]:
+        section("score", lambda: score_card(runs["ANALYSIS"][-1]))
+
+    if "OPTIONS" in context_types:
+        chunks = safe("options report", lambda: pc.latest_run_chunks(ticker, "OPTIONS")) or []
+        if chunks:
+            text = report_text(chunks)
+            meta = chunks[0].get("metadata") or {}
+            src = _source(meta)
+            price = parse_current_price(text)
+            if price is None and _is_num(meta.get("price_at_analysis")):
+                price = float(meta["price_at_analysis"])
+            if _is_num(meta.get("iv_rank")):
+                out["iv"] = {"iv_rank": meta["iv_rank"], "source": src}
+            if price:
+                section("expected_move", lambda: sourced(parse_expected_move(text, price), src))
+                section("key_levels", lambda: sourced(parse_key_levels(text, price), src))
+                section("strategy", lambda: sourced(parse_strategy(text, price), src))
+
+    if out or trajectory:
+        section("trend", lambda: trend(runs["ANALYSIS"], runs["OPTIONS"], focus=trajectory))
+    return {"ticker": ticker, **out} if out else None

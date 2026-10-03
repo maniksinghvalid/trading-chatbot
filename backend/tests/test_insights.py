@@ -276,3 +276,107 @@ class TestStrategy:
 
     def test_strategy_missing(self) -> None:
         assert insights.parse_strategy(VDY_OPTIONS, 75.75) is None
+
+
+MARA_ANALYSIS_META = {
+    "composite_score": 29, "grade": "D", "signal": "CAUTION",
+    "technical_score": 28, "fundamental_score": 27, "sentiment_score": 32,
+    "risk_score": 27, "thesis_score": 33,
+    "price_at_analysis": 11.23, "stop_loss": 9.8, "nearest_catalyst_date": "2026-11-05",
+    "generated_date": "2026-10-03", "source_path": "TRADE-ANALYSIS-MARA.md", "report_type": "ANALYSIS",
+}
+
+
+class TestScoreAndTrend:
+    def test_score_card_from_metadata(self) -> None:
+        s = insights.score_card(MARA_ANALYSIS_META)
+        assert (s["composite"], s["grade"], s["signal"]) == (29, "D", "CAUTION")
+        assert [d["score"] for d in s["dimensions"]] == [28, 27, 32, 27, 33]
+        assert round(sum(d["weight"] for d in s["dimensions"]), 6) == 1.0
+        assert (s["price"], s["stop_loss"], s["catalyst_date"]) == (11.23, 9.8, "2026-11-05")
+        assert s["source"] == {"source_path": "TRADE-ANALYSIS-MARA.md", "generated_date": "2026-10-03"}
+
+    def test_score_card_needs_composite(self) -> None:
+        assert insights.score_card({"grade": "D"}) is None
+
+    def test_trend_merges_by_date_analysis_price_wins(self) -> None:
+        analysis = [
+            {"generated_date": "2026-10-02", "price_at_analysis": 11.0, "composite_score": 25, "signal": "CAUTION"},
+            {"generated_date": "2026-10-03", "price_at_analysis": 11.23, "composite_score": 29, "signal": "CAUTION"},
+        ]
+        options = [
+            {"generated_date": "2026-10-01", "price_at_analysis": 12.0, "iv_rank": 40, "signal": "NEUTRAL"},
+            {"generated_date": "2026-10-03", "price_at_analysis": 11.5, "iv_rank": 32, "signal": "CAUTION"},
+        ]
+        t = insights.trend(analysis, options, focus=True)
+        assert t["focus"] is True
+        assert [p["date"] for p in t["points"]] == ["2026-10-01", "2026-10-02", "2026-10-03"]
+        assert t["points"][2] == {"date": "2026-10-03", "price": 11.23, "score": 29, "iv_rank": 32, "signal": "CAUTION"}
+        assert t["points"][0] == {"date": "2026-10-01", "price": 12.0, "iv_rank": 40, "signal": "NEUTRAL"}
+
+    def test_trend_needs_two_points(self) -> None:
+        assert insights.trend([{"generated_date": "2026-10-03", "composite_score": 29}], [], focus=False) is None
+
+
+class TestBuildInsights:
+    @pytest.fixture
+    def fake_pc(self, monkeypatch: pytest.MonkeyPatch):
+        options_meta = {"report_type": "OPTIONS", "iv_rank": 32, "price_at_analysis": 99.0,
+                        "generated_date": "2026-10-03", "source_path": "TRADE-OPTIONS-MARA-20261003-1311.md",
+                        "section": "x"}
+        runs = {
+            "ANALYSIS": [dict(MARA_ANALYSIS_META, generated_date="2026-10-02"), MARA_ANALYSIS_META],
+            "OPTIONS": [dict(options_meta, generated_date="2026-10-02"), options_meta],
+        }
+        monkeypatch.setattr(insights.pc, "run_metadata", lambda t, rt, limit=60: runs.get(rt, []))
+        monkeypatch.setattr(
+            insights.pc, "latest_run_chunks",
+            lambda t, rt: [{"text": MARA_OPTIONS, "metadata": options_meta}] if rt == "OPTIONS" else [],
+        )
+
+    def test_analysis_context_gives_score_and_trend(self, fake_pc) -> None:
+        out = insights.build_insights("MARA", {"ANALYSIS"}, "factual")
+        assert set(out) == {"ticker", "score", "trend"}
+        assert out["trend"]["focus"] is False
+
+    def test_options_context_gives_options_sections(self, fake_pc) -> None:
+        out = insights.build_insights("MARA", {"OPTIONS"}, "factual")
+        assert set(out) == {"ticker", "iv", "expected_move", "key_levels", "strategy", "trend"}
+        assert out["iv"]["iv_rank"] == 32
+        assert out["strategy"]["source"]["source_path"] == "TRADE-OPTIONS-MARA-20261003-1311.md"
+
+    def test_build_insights_prefers_report_price(self, fake_pc) -> None:
+        # metadata says 99.0, report text says $11.23 → visuals use the report.
+        out = insights.build_insights("MARA", {"OPTIONS"}, "factual")
+        assert out["expected_move"]["price"] == 11.23
+        assert out["strategy"]["max_loss"] == -1.43
+
+    def test_trajectory_gives_focused_trend(self, fake_pc) -> None:
+        out = insights.build_insights("MARA", set(), "trajectory")
+        assert set(out) == {"ticker", "trend"}
+        assert out["trend"]["focus"] is True
+
+    def test_no_ticker_or_nothing_relevant(self, fake_pc) -> None:
+        assert insights.build_insights(None, {"ANALYSIS"}, "factual") is None
+        assert insights.build_insights("MARA", set(), "factual") is None
+
+    def test_one_failing_section_keeps_the_rest(self, fake_pc, monkeypatch: pytest.MonkeyPatch) -> None:
+        def boom(*a, **kw):
+            raise ValueError("bad table")
+        monkeypatch.setattr(insights, "parse_key_levels", boom)
+        out = insights.build_insights("MARA", {"OPTIONS"}, "factual")
+        assert "key_levels" not in out and "expected_move" in out and "strategy" in out
+
+    def test_pinecone_failure_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def down(*a, **kw):
+            raise ConnectionError("pinecone down")
+        monkeypatch.setattr(insights.pc, "run_metadata", down)
+        monkeypatch.setattr(insights.pc, "latest_run_chunks", down)
+        assert insights.build_insights("MARA", {"ANALYSIS", "OPTIONS"}, "factual") is None
+
+    def test_no_liquid_options_gives_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        meta = {"report_type": "OPTIONS", "iv_rank": None, "generated_date": "2026-10-03",
+                "source_path": "TRADE-OPTIONS-VDY.md"}
+        monkeypatch.setattr(insights.pc, "run_metadata", lambda *a, **kw: [])
+        monkeypatch.setattr(insights.pc, "latest_run_chunks", lambda t, rt: [{"text": VDY_OPTIONS, "metadata": meta}])
+        assert insights.build_insights("VDY", {"OPTIONS"}, "factual") is None
