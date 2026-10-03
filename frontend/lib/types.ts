@@ -11,6 +11,7 @@
  *   StreamEvent     — a parsed SSE event {event, data} from /chat/stream
  *   Message         — local UI message (role, content, citations, quote)
  *   Quote           — live market-data quote from the SSE quote event (02-02)
+ *   Insights        — grounded report visuals from the SSE insights event
  *   SessionSummary  — summary entry returned by GET /sessions
  *   SessionTurn     — a single turn entry from GET /sessions/{id}
  */
@@ -96,13 +97,14 @@ export interface ChatResponse {
  *   1. event="session"   data=<session_id UUID>
  *   2. event="citations" data=<JSON Citation[]>
  *   2a. event="quote"   data=<JSON Quote> (added in 02-02; only for price-intent questions)
+ *   2b. event="insights" data=<JSON Insights> (optional, at most once, anywhere before done)
  *   3. event="token"     data=<partial token string>  (repeated N times)
  *   4. event="done"      data=""
  *
  * Error path: event="error" then event="done" (no key/stack trace in data).
  */
 export interface StreamEvent {
-  event: "session" | "citations" | "quote" | "token" | "done" | "error" | string;
+  event: "session" | "citations" | "quote" | "insights" | "token" | "done" | "error" | string;
   data: string;
 }
 
@@ -113,4 +115,105 @@ export interface Message {
   citations?: Citation[];
   /** Live market-data quote, if the backend emitted a quote event for this message. */
   quote?: Quote;
+  /** Grounded report visuals, if the backend emitted an insights event for this message. */
+  insights?: Insights;
+}
+
+/** Provenance shown in each insight card's footer. */
+export interface InsightSource {
+  source_path: string;
+  generated_date: string;
+}
+
+export interface ScoreInsight {
+  composite: number;
+  grade: string | null;
+  signal: string | null;
+  dimensions: { name: string; score: number; weight: number }[];
+  price: number | null;
+  stop_loss: number | null;
+  catalyst_date: string | null;
+  source: InsightSource;
+}
+
+export interface TrendPoint {
+  date: string;
+  price?: number;
+  score?: number;
+  iv_rank?: number;
+  signal?: string;
+}
+
+export interface TrendInsight {
+  /** Oldest → newest, ≤ 60. */
+  points: TrendPoint[];
+  /** True for trend questions — render the full TrendCard; else only sparklines. */
+  focus: boolean;
+}
+
+export interface IvInsight {
+  iv_rank: number;
+  source: InsightSource;
+}
+
+export interface MoveRange {
+  label: string;
+  low: number;
+  high: number;
+  pct: number | null;
+  approx: boolean;
+}
+
+export interface ExpectedMoveInsight {
+  price: number;
+  ranges: MoveRange[];
+  source: InsightSource;
+}
+
+export interface KeyLevel {
+  label: string;
+  price: number;
+  note: string | null;
+  approx: boolean;
+}
+
+export interface KeyLevelsInsight {
+  price: number;
+  /** Sorted high → low. */
+  levels: KeyLevel[];
+  source: InsightSource;
+}
+
+export interface StrategyLeg {
+  action: "buy" | "sell";
+  type: "call" | "put";
+  strike: number;
+  premium: number;
+  approx: boolean;
+}
+
+export interface StrategyInsight {
+  name: string;
+  expiration: string;
+  includes_stock: boolean;
+  price: number;
+  legs: StrategyLeg[];
+  /** [underlying price at expiry, P/L per share], ascending x. */
+  curve: [number, number][];
+  breakevens: number[];
+  /** null = unbounded. */
+  max_gain: number | null;
+  max_loss: number | null;
+  source: InsightSource;
+}
+
+/** Payload of the SSE `insights` event — every value comes from report data, never the LLM. */
+export interface Insights {
+  ticker: string;
+  score?: ScoreInsight;
+  trend?: TrendInsight;
+  iv?: IvInsight;
+  expected_move?: ExpectedMoveInsight;
+  key_levels?: KeyLevelsInsight;
+  strategy?: StrategyInsight;
 }

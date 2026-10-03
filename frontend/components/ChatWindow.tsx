@@ -7,6 +7,7 @@
  *   event=session   → store sessionId for conversation continuity
  *   event=citations → attach citations to the current assistant message
  *   event=quote     → attach live market-data quote to the current assistant message (02-02)
+ *   event=insights  → attach grounded report visuals to the current assistant message
  *   event=token     → accumulate into the current assistant message content
  *   event=done      → stop streaming, set streaming=false
  *   event=error     → render error message, stop streaming
@@ -21,7 +22,7 @@
 
 import { useRef, useEffect, useState, FormEvent } from "react";
 import { streamChat } from "@/lib/api";
-import type { Citation, Message, Quote } from "@/lib/types";
+import type { Citation, Insights, Message, Quote } from "@/lib/types";
 import MessageBubble from "./MessageBubble";
 
 /** Starter prompts for the empty state. Clicking one sends it immediately. */
@@ -151,6 +152,20 @@ export default function ChatWindow({
             }
             if (parsedQuote) {
               updateLastMessage((prev) => ({ ...prev, quote: parsedQuote }));
+            }
+            break;
+          }
+
+          case "insights": {
+            // Grounded report visuals (spec 2026-10-03) — malformed JSON is ignored
+            let parsedInsights: Insights | undefined;
+            try {
+              parsedInsights = JSON.parse(event.data) as Insights;
+            } catch {
+              parsedInsights = undefined;
+            }
+            if (parsedInsights) {
+              updateLastMessage((prev) => ({ ...prev, insights: parsedInsights }));
             }
             break;
           }
