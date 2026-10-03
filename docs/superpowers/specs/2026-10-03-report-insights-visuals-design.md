@@ -75,9 +75,9 @@ frontend charting of tables found in LLM output (generic; model-transcribed numb
   failure (logged as a warning). Returns `None` when no section was built.
 - `parse_expected_move(text) -> dict | None`
 - `parse_key_levels(text) -> dict | None`
-- `parse_strategy(text, recommended_name, price) -> dict | None` — first legs table under
-  "Recommended Strategies" (Strategy 1); name from the `### Strategy 1: <name>` heading,
-  falling back to metadata `recommended_strategy`.
+- `parse_strategy(text, price) -> dict | None` — the first legs table inside the
+  `### Strategy 1: <name>` section; name from that heading. No heading → `None` (legs
+  can't be attributed to the recommended strategy).
 - `payoff(legs, price, includes_stock) -> dict | None` (see §5).
 - `score_card(meta) -> dict | None`, `trend(points) -> dict | None`.
 
@@ -143,7 +143,8 @@ All sections optional. Each section carries `source: {source_path, generated_dat
     "price": 11.23, "stop_loss": 9.8, "catalyst_date": "2026-11-05", "source": {…}
   },
   "trend": {
-    "points": [{"date": "2026-09-01", "price": 14.1, "score": 35, "iv_rank": 41, "signal": "NEUTRAL"}]
+    "points": [{"date": "2026-09-01", "price": 14.1, "score": 35, "iv_rank": 41, "signal": "NEUTRAL"}],
+    "focus": false   // true for trajectory questions → full TrendCard; else sparklines only
   },
   "iv": {"iv_rank": 32, "source": {…}},
   "expected_move": {
@@ -178,8 +179,8 @@ OPTIONS (`iv_rank`) by date; ANALYSIS price wins when both exist; one run per da
 - `MessageBubble.tsx`: render `<InsightsPanel>` below the memo header, above
   `QuoteCard` and the text. Entrance uses the existing `animate-rise`.
 - `components/insights/`:
-  - `InsightsPanel.tsx` — responsive grid; full-width cards, Levels + Payoff side by side
-    on ≥ sm.
+  - `InsightsPanel.tsx` — responsive grid; score, trend, expected move and payoff full
+    width; Key levels + IV side by side on ≥ sm.
   - `ScoreCard.tsx` — semicircle gauge banded by the grade table (85+ A+ … 0–24 F),
     needle at composite, grade + signal pills, 5 dimension bars with weights, footer
     (price, stop-loss distance %, catalyst countdown), price/score sparklines (last 30).
@@ -193,7 +194,9 @@ OPTIONS (`iv_rank`) by date; ANALYSIS price wins when both exist; one run per da
     gain / max loss labels, current-price marker, legs table, caption *"Per share at
     expiration · premiums as quoted in report · ignores fees and early assignment"*.
   - `IvCard.tsx` — IV-rank meter (0–100) + IV-rank sparkline.
-  - `Sparkline.tsx`, `chart.ts` — shared scale / tick / path helpers.
+  - `Sparkline.tsx`, `InsightCard.tsx` (shared frame + provenance footer).
+- `lib/chart.ts` — pure scale / path / colour / format helpers (under `lib/` so the
+  existing vitest config covers them).
 - Every chart: `role="img"` with a text summary `aria-label`; all text rendered via JSX
   (no HTML injection, T-06-01); `~` prefix for `approx` values; provenance footer.
 - A missing section renders nothing; an answer without insights looks as today.
