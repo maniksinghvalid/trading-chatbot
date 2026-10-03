@@ -618,3 +618,90 @@ def test_stream_quote_unavailable_no_quote_event(client, auth_headers, monkeypat
     # But the stream should still complete with tokens and done
     assert "token" in event_names
     assert "done" in event_names
+
+
+# ---------------------------------------------------------------------------
+# Insights (spec 2026-10-03-report-insights-visuals-design)
+# ---------------------------------------------------------------------------
+
+_FAKE_INSIGHTS = {"ticker": "AAPL", "score": {"composite": 82, "grade": "A", "signal": "BUY"}}
+
+
+def test_stream_emits_insights_between_citations_and_done(client, auth_headers, monkeypatch):
+    calls: list = []
+
+    def _build(ticker, context_types, intent):
+        calls.append((ticker, set(context_types), intent))
+        return _FAKE_INSIGHTS
+
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
+    monkeypatch.setattr("src.routes.chat.build_insights", _build)
+
+    resp = client.post("/chat/stream", headers=auth_headers, json={"message": "bull case for AAPL", "ticker": "AAPL"})
+    events = _parse_sse_events(resp.content)
+    names = [e["event"] for e in events]
+
+    assert names.count("insights") == 1
+    assert names.index("citations") < names.index("insights") < names.index("done")
+    assert names[-1] == "done"
+    assert json.loads(events[names.index("insights")]["data"]) == _FAKE_INSIGHTS
+    assert calls == [("AAPL", {"ANALYSIS"}, "factual")]
+
+
+def test_stream_insights_failure_keeps_answer(client, auth_headers, monkeypatch):
+    def _boom(*a, **kw):
+        raise RuntimeError("builder exploded")
+
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
+    monkeypatch.setattr("src.routes.chat.build_insights", _boom)
+
+    resp = client.post("/chat/stream", headers=auth_headers, json={"message": "bull case for AAPL", "ticker": "AAPL"})
+    events = _parse_sse_events(resp.content)
+    names = [e["event"] for e in events]
+
+    assert "insights" not in names and "error" not in names
+    assert "".join(e["data"] for e in events if e["event"] == "token") == "".join(_FAKE_TOKENS)
+    assert names[-1] == "done"
+
+
+def test_stream_no_insights_event_when_nothing_built(client, auth_headers, monkeypatch):
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
+
+    resp = client.post("/chat/stream", headers=auth_headers, json={"message": "bull case for AAPL", "ticker": "AAPL"})
+    assert "insights" not in [e["event"] for e in _parse_sse_events(resp.content)]
+
+
+def test_stream_waits_briefly_for_slow_insights(client, auth_headers, monkeypatch):
+    import time
+
+    def _slow(*a, **kw):
+        time.sleep(0.2)
+        return _FAKE_INSIGHTS
+
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
+    monkeypatch.setattr("src.routes.chat.build_insights", _slow)
+
+    resp = client.post("/chat/stream", headers=auth_headers, json={"message": "bull case for AAPL", "ticker": "AAPL"})
+    names = [e["event"] for e in _parse_sse_events(resp.content)]
+    assert names.index("insights") < names.index("done")
+
+
+def test_stream_drops_insights_past_the_wait_budget(client, auth_headers, monkeypatch):
+    import time
+
+    def _too_slow(*a, **kw):
+        time.sleep(0.5)
+        return _FAKE_INSIGHTS
+
+    monkeypatch.setattr("src.routes.chat.retrieve", lambda *a, **kw: _FAKE_CHUNKS)
+    monkeypatch.setattr("src.routes.chat.stream_complete", _make_stream_mock(_FAKE_TOKENS))
+    monkeypatch.setattr("src.routes.chat.build_insights", _too_slow)
+    monkeypatch.setattr("src.routes.chat._INSIGHTS_WAIT_S", 0.05)
+
+    resp = client.post("/chat/stream", headers=auth_headers, json={"message": "bull case for AAPL", "ticker": "AAPL"})
+    names = [e["event"] for e in _parse_sse_events(resp.content)]
+    assert "insights" not in names and names[-1] == "done"

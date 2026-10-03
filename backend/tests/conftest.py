@@ -97,3 +97,10 @@ def pinecone_key_present() -> bool:
 def postgres_dsn_present() -> bool:
     """Boolean fixture: True when DATABASE_URL is set to a Postgres DSN."""
     return _postgres_dsn_present()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_insights(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The route's insights builder reads live Pinecone; stub it for every test.
+    Tests that exercise insights override it with their own monkeypatch."""
+    monkeypatch.setattr("src.routes.chat.build_insights", lambda *a, **kw: None)

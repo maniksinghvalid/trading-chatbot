@@ -20,6 +20,8 @@ Streaming flow (POST /chat/stream, slice 4):
        event: session    (the session_id)
        event: citations  (JSON list of Citation objects — once, up front)
        event: quote      (JSON quote dict — ONLY for price-intent requests, slice 7)
+       event: insights   (JSON visuals payload — optional, at most once, anywhere
+                          between citations and done; built from report data only)
        event: token      (one per yielded chunk from stream_complete)
        event: done
   6. Buffer all tokens; on completion append_turn for user + assistant.
@@ -51,12 +53,14 @@ import json
 import logging
 import re
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import AsyncGenerator
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
 from src.auth import get_current_user
+from src.insights import build_insights
 from src.intent_classifier import classify_intent
 from src.llm_client import LLMProviderError, complete, stream_complete
 import src.market_data as market_data
@@ -188,6 +192,23 @@ def _format_quote_message(ticker: str, q: dict) -> str:
         f"volume {_fnum(q.get('volume'), ',')} (source: {q.get('source', 'yfinance')}). "
         "This is live price data, not stored analysis — educational use only, not financial advice."
     )
+
+
+# Insights (spec 2026-10-03): grounded visuals built off the token path, alongside
+# the LLM call, so they never delay the first token.
+_INSIGHTS_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="insights")
+_INSIGHTS_WAIT_S = 2.0
+
+
+def _insights_event(future: Future, timeout: float = 0) -> dict | None:
+    """The `insights` SSE event once the builder finished; None if it failed, timed
+    out or had nothing to show. Never raises — visuals can't break the chat."""
+    try:
+        payload = future.result(timeout=timeout)
+    except Exception as exc:
+        logger.warning("insights: dropped (%r)", exc)
+        return None
+    return {"event": "insights", "data": json.dumps(payload)} if payload else None
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -499,6 +520,14 @@ def post_chat_stream(
                 )
                 live_quote = None  # degrade gracefully; no quote event emitted
 
+        insights_future = _INSIGHTS_POOL.submit(
+            build_insights,
+            ticker_upper,
+            {(c.get("metadata") or {}).get("report_type") for c in chunks},
+            intent,
+        )
+        insights_pending = True
+
         # --- Step 3: Build messages list (history + new grounded user prompt) ---
         history_messages: list[dict] = [
             {"role": t.role, "content": t.content}
@@ -511,6 +540,11 @@ def post_chat_stream(
         full_response_parts: list[str] = []
         try:
             for token in stream_complete(system=SYSTEM_PROMPT, messages=messages):
+                if insights_pending and insights_future.done():
+                    insights_pending = False
+                    event = _insights_event(insights_future)
+                    if event:
+                        yield event
                 full_response_parts.append(token)
                 yield {"event": "token", "data": token}
         except LLMProviderError as exc:
@@ -519,6 +553,11 @@ def post_chat_stream(
             yield {"event": "error", "data": "LLM provider unavailable"}
             yield {"event": "done", "data": ""}
             return
+
+        if insights_pending:
+            event = _insights_event(insights_future, timeout=_INSIGHTS_WAIT_S)
+            if event:
+                yield event
 
         # --- Step 5: Persist both turns on completion ---
         # Record retrieved chunk IDs on the assistant turn for audit (DB-01).
