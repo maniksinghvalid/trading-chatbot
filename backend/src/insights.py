@@ -146,3 +146,84 @@ def parse_key_levels(text: str, price: float) -> Optional[dict]:
             levels.sort(key=lambda lv: lv["price"], reverse=True)
             return {"price": price, "levels": levels[:12]}
     return None
+
+
+def payoff(legs: list[dict], price: float, includes_stock: bool) -> dict:
+    """Per-share P/L at expiration (spec §5). Piecewise linear, kinks at the strikes."""
+    strikes = sorted({leg["strike"] for leg in legs})
+
+    def pl(s: float) -> float:
+        value = (s - price) if includes_stock else 0.0
+        for leg in legs:
+            k = leg["strike"]
+            intrinsic = max(s - k, 0.0) if leg["type"] == "call" else max(k - s, 0.0)
+            value += (intrinsic - leg["premium"]) * (1 if leg["action"] == "buy" else -1)
+        return value
+
+    lo, hi = 0.6 * min(strikes + [price]), 1.4 * max(strikes + [price])
+    xs = sorted({round(lo + (hi - lo) * i / 59, 2) for i in range(60)} | set(strikes))
+    kinks = [0.0] + strikes + [hi]
+    values = [pl(s) for s in kinks]
+    slope = pl(strikes[-1] + 1) - pl(strikes[-1])  # constant above the highest strike
+    breakevens: list[float] = []
+    # ponytail: a breakeven landing exactly on a strike isn't reported (strict sign change).
+    for (a, fa), (b, fb) in zip(zip(kinks, values), zip(kinks[1:], values[1:])):
+        if fa * fb < 0:
+            breakevens.append(round(a - fa * (b - a) / (fb - fa), 2))
+    return {
+        "curve": [[x, round(pl(x), 2)] for x in xs],
+        "breakevens": breakevens,
+        "max_gain": None if slope > 1e-9 else round(max(values), 2),
+        "max_loss": None if slope < -1e-9 else round(min(values), 2),
+    }
+
+
+_STRATEGY_1 = re.compile(r"^###\s*Strategy 1:\s*(.+)$", re.M)
+_NEXT_HEADING = re.compile(r"^#{2,3}\s", re.M)
+_STOCK_STRATEGY = re.compile(r"collar|covered call|protective put", re.I)
+
+
+def parse_strategy(text: str, price: float) -> Optional[dict]:
+    """Strategy 1 of the report's Recommended Strategies, with its payoff. None when
+    its legs don't parse or span several expirations (e.g. PMCC)."""
+    m = _STRATEGY_1.search(text)
+    if not m:
+        return None
+    name = _label(re.split(r"\s+[—–-]\s+", m.group(1))[0])
+    body = text[m.end():]
+    nxt = _NEXT_HEADING.search(body)
+    body = body[: nxt.start()] if nxt else body
+
+    for header, rows in _tables(body):
+        i_act, i_strike, i_type = _col(header, "action"), _col(header, "strike"), _col(header, "type")
+        i_exp = _col(header, "expir")
+        i_px = next((i for i, h in enumerate(header) if "price" in h), None)
+        if None in (i_act, i_strike, i_type, i_exp, i_px):
+            continue
+        legs: list[dict] = []
+        expirations: set[str] = set()
+        for row in rows:
+            if len(row) != len(header):
+                continue
+            action, kind = row[i_act].lower(), row[i_type].lower()
+            strike, premium = _num(row[i_strike]), _num(row[i_px])
+            if action not in ("buy", "sell") or kind not in ("call", "put") or strike is None or premium is None:
+                continue
+            legs.append({"action": action, "type": kind, "strike": strike,
+                         "premium": premium, "approx": "~" in row[i_px]})
+            expirations.add(row[i_exp])
+        break  # only the first legs table belongs to Strategy 1
+    else:
+        return None
+
+    if not legs or len(legs) > 4 or len(expirations) != 1:
+        return None
+    includes_stock = bool(_STOCK_STRATEGY.search(name)) and "poor man" not in name.lower()
+    return {
+        "name": name,
+        "expiration": _label(expirations.pop()),
+        "includes_stock": includes_stock,
+        "price": price,
+        "legs": legs,
+        **payoff(legs, price, includes_stock),
+    }

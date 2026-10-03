@@ -198,3 +198,81 @@ class TestKeyLevels:
 
     def test_key_levels_missing(self) -> None:
         assert insights.parse_key_levels(VDY_OPTIONS, 75.75) is None
+
+
+def _leg(action: str, kind: str, strike: float, premium: float) -> dict:
+    return {"action": action, "type": kind, "strike": strike, "premium": premium, "approx": False}
+
+
+class TestPayoff:
+    def test_collar_reference_values(self) -> None:
+        # Spec §5 reference: MARA collar 2026-10-03.
+        p = insights.payoff([_leg("buy", "put", 10.0, 1.55), _leg("sell", "call", 13.0, 1.35)], 11.23, True)
+        assert p["max_loss"] == -1.43
+        assert p["max_gain"] == 1.57
+        assert p["breakevens"] == [11.43]
+
+    def test_bear_put_spread_without_stock(self) -> None:
+        p = insights.payoff([_leg("buy", "put", 11.0, 2.20), _leg("sell", "put", 8.0, 0.80)], 11.23, False)
+        assert (p["max_gain"], p["max_loss"], p["breakevens"]) == (1.6, -1.4, [9.6])
+
+    def test_covered_call(self) -> None:
+        p = insights.payoff([_leg("sell", "call", 5.50, 0.30)], 5.10, True)
+        assert (p["max_gain"], p["max_loss"], p["breakevens"]) == (0.7, -4.8, [4.8])
+
+    def test_unbounded_sides(self) -> None:
+        assert insights.payoff([_leg("buy", "call", 10.0, 1.0)], 10.0, False)["max_gain"] is None
+        assert insights.payoff([_leg("sell", "call", 10.0, 1.0)], 10.0, False)["max_loss"] is None
+
+    def test_curve_is_bounded_and_covers_price(self) -> None:
+        p = insights.payoff([_leg("buy", "put", 10.0, 1.55), _leg("sell", "call", 13.0, 1.35)], 11.23, True)
+        xs = [x for x, _ in p["curve"]]
+        assert len(p["curve"]) <= 80
+        assert xs == sorted(xs) and xs[0] < 10.0 and xs[-1] > 13.0
+        assert [10.0, -1.43] in p["curve"] and [13.0, 1.57] in p["curve"]
+
+
+class TestStrategy:
+    def test_strategy_mara_collar(self) -> None:
+        s = insights.parse_strategy(MARA_OPTIONS, 11.23)
+        assert s["name"] == "Collar"
+        assert s["expiration"] == "Nov 21, 2026"
+        assert s["includes_stock"] is True
+        assert s["legs"] == [
+            {"action": "buy", "type": "put", "strike": 10.0, "premium": 1.55, "approx": True},
+            {"action": "sell", "type": "call", "strike": 13.0, "premium": 1.35, "approx": True},
+        ]
+        assert (s["max_loss"], s["max_gain"], s["breakevens"]) == (-1.43, 1.57, [11.43])
+
+    def test_strategy_nio_signed_premiums_and_summary_row(self) -> None:
+        s = insights.parse_strategy(NIO_LEGACY, 4.88)
+        assert s["name"] == "Collar"
+        assert [(leg["action"], leg["premium"]) for leg in s["legs"]] == [("sell", 0.31), ("buy", 0.18)]
+        assert (s["max_loss"], s["max_gain"], s["breakevens"]) == (-0.25, 0.25, [4.75])
+
+    def test_strategy_expiry_and_est_price_headers(self) -> None:
+        text = (
+            "### Strategy 1: Bear Put Spread — HEDGE\n\n"
+            "| Leg | Action | Strike | Expiry | Type | Price (est.) |\n"
+            "|---|---|---|---|---|---|\n"
+            "| 1 | Buy | $11.00 | Nov 21 | Put | ~$2.20 |\n"
+            "| 2 | Sell | $8.00 | Nov 21 | Put | ~$0.80 |\n"
+        )
+        s = insights.parse_strategy(text, 11.23)
+        assert s["includes_stock"] is False
+        assert (s["max_gain"], s["max_loss"]) == (1.6, -1.4)
+
+    def test_strategy_pmcc_mixed_expirations_is_none(self) -> None:
+        assert insights.parse_strategy(CLOV_PMCC, 4.38) is None
+
+    def test_strategy_only_reads_strategy_1_section(self) -> None:
+        text = (
+            "### Strategy 1: Collar — HEDGE\n\nNo legs table here.\n\n"
+            "### Strategy 2: Bear Put Spread\n"
+            "| Leg | Action | Strike | Expiration | Type | Price |\n|---|---|---|---|---|---|\n"
+            "| 1 | Buy | $11.00 | Nov 21 | Put | $2.20 |\n"
+        )
+        assert insights.parse_strategy(text, 11.23) is None
+
+    def test_strategy_missing(self) -> None:
+        assert insights.parse_strategy(VDY_OPTIONS, 75.75) is None
