@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from typing import AsyncGenerator
 
@@ -96,6 +97,35 @@ def _wants_live_quote(intent: str, message: str, ticker: str | None) -> bool:
         return False
     msg_lower = message.lower()
     return any(kw in msg_lower for kw in _PRICE_KEYWORDS)
+
+
+# Report names a user can ask for by name ("recent options report on MARA").
+# "risk"/"earnings" are left out: "what are its risks?" isn't a request for the
+# RISK report, and a wrong narrowing would hide the newest ANALYSIS.
+_REPORT_TYPES = {
+    "option": "OPTIONS",
+    "technical": "TECHNICAL",
+    "fundamental": "FUNDAMENTAL",
+    "sentiment": "SENTIMENT",
+    "thesis": "THESIS",
+}
+_REPORT_TYPE_RE = re.compile(rf"\b({'|'.join(_REPORT_TYPES)})s?\b", re.I)
+
+
+def _retrieve_chunks(message: str, ticker: str | None, intent: str) -> list[dict]:
+    """Retrieve context: the newest report of each type (except for trend
+    questions, which need history), narrowed to the report the user named when
+    the ticker has one."""
+    latest_only = intent != "trajectory"
+    named = _REPORT_TYPE_RE.search(message)
+    if named:
+        chunks = retrieve(
+            message, ticker=ticker, report_type=_REPORT_TYPES[named.group(1).lower()],
+            k=_RETRIEVE_K, latest_only=latest_only,
+        )
+        if chunks:
+            return chunks
+    return retrieve(message, ticker=ticker, k=_RETRIEVE_K, latest_only=latest_only)
 
 
 # Affirmative replies that, following a no-data "live market data?" offer, mean
@@ -223,7 +253,7 @@ def post_chat(
 
     # --- Step 2: Retrieve chunks ---
     try:
-        chunks = retrieve(req.message, ticker=ticker_upper, k=_RETRIEVE_K)
+        chunks = _retrieve_chunks(req.message, ticker_upper, intent)
     except Exception as exc:
         logger.error("post_chat: Pinecone retrieval failed: %s", exc)
         # Graceful degradation: treat retrieval failure as no-data
@@ -388,7 +418,7 @@ def post_chat_stream(
 
         # --- Step 2: Retrieve chunks ---
         try:
-            chunks = retrieve(req.message, ticker=ticker_upper, k=_RETRIEVE_K)
+            chunks = _retrieve_chunks(req.message, ticker_upper, intent)
         except Exception as exc:
             logger.error("post_chat_stream: Pinecone retrieval failed: %s", exc)
             chunks = []

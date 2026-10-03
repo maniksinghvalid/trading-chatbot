@@ -317,8 +317,8 @@ def test_post_chat_auto_ticker_from_message(client, auth_headers, monkeypatch):
     """
     retrieve_calls: list[dict] = []
 
-    def _capturing_retrieve(text, ticker=None, k=6):
-        retrieve_calls.append({"text": text, "ticker": ticker})
+    def _capturing_retrieve(text, ticker=None, k=6, latest_only=False, report_type=None):
+        retrieve_calls.append({"text": text, "ticker": ticker, "latest_only": latest_only})
         return _FAKE_CHUNKS
 
     # Override the autouse stub: extract_tickers returns AAPL for this test
@@ -333,16 +333,37 @@ def test_post_chat_auto_ticker_from_message(client, auth_headers, monkeypatch):
     assert resp.status_code == 200
 
     assert len(retrieve_calls) == 1, "retrieve must be called exactly once"
+    # Non-trend questions are scoped to the newest report per type.
+    assert retrieve_calls[0]["latest_only"] is True
     assert retrieve_calls[0]["ticker"] == "AAPL", (
         f"Expected retrieve called with ticker='AAPL', got {retrieve_calls[0]['ticker']!r}"
     )
+
+
+def test_post_chat_named_report_scopes_retrieval(client, auth_headers, monkeypatch):
+    """'recent options report on MARA' retrieves the OPTIONS report; if the ticker
+    has none, it falls back to all report types instead of a no-data answer."""
+    calls: list = []
+
+    def _retrieve(text, ticker=None, k=6, latest_only=False, report_type=None):
+        calls.append(report_type)
+        return [] if report_type else _FAKE_CHUNKS
+
+    monkeypatch.setattr("src.routes.chat.extract_tickers", lambda text: ["MARA"])
+    monkeypatch.setattr("src.routes.chat.retrieve", _retrieve)
+    monkeypatch.setattr("src.routes.chat.complete", lambda *a, **kw: _FAKE_LLM_ANSWER)
+
+    resp = client.post("/chat", json={"message": "recent options report on MARA"}, headers=auth_headers)
+    assert resp.status_code == 200
+    assert calls == ["OPTIONS", None]
+    assert resp.json()["citations"], "fallback must still ground the answer"
 
 
 def test_post_chat_explicit_ticker_wins_over_extraction(client, auth_headers, monkeypatch):
     """Explicit req.ticker takes precedence over extracted tickers (TICK-01)."""
     retrieve_calls: list[dict] = []
 
-    def _capturing_retrieve(text, ticker=None, k=6):
+    def _capturing_retrieve(text, ticker=None, k=6, latest_only=False, report_type=None):
         retrieve_calls.append({"ticker": ticker})
         return _FAKE_CHUNKS
 
@@ -515,7 +536,7 @@ def test_coreference_resolves_most_recent_ticker(client, auth_headers, monkeypat
     # Turn 3: bare "stock price" — no explicit ticker, no extraction result
     retrieve_calls: list[dict] = []
 
-    def _capturing_retrieve(text, ticker=None, k=6):
+    def _capturing_retrieve(text, ticker=None, k=6, latest_only=False, report_type=None):
         retrieve_calls.append({"text": text, "ticker": ticker})
         return _FAKE_CHUNKS
 

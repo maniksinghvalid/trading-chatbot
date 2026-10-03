@@ -32,6 +32,8 @@ Threat mitigations applied here:
 from __future__ import annotations
 
 import logging
+import time
+from functools import lru_cache
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -200,11 +202,37 @@ def _list_ids(index: Any, prefix: str, namespace: str) -> list[str]:
     return ids
 
 
+# ponytail: listing every ID for a ticker costs ~2s at ~2k chunks and grows daily,
+# so the newest-date map is cached for 10 min. Upgrade path: a producer-written
+# "<TICKER>:LATEST" pointer record, or listing only recent YYYYMM ID prefixes.
+_LATEST_TTL_S = 600
+
+
+@lru_cache(maxsize=256)
+def _latest_dates_cached(ticker: str, _bucket: int) -> dict[str, str]:
+    latest: dict[str, str] = {}
+    for vid in _list_ids(_get_index(), f"{ticker}:", _get_namespace()):
+        parts = vid.split(":")  # <TICKER>:<TYPE>:<YYYYMMDD-HHMM>:<slug>:<n>
+        if len(parts) < 3 or len(parts[2]) < 8:
+            continue
+        d = parts[2]
+        date = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+        if date > latest.get(parts[1], ""):
+            latest[parts[1]] = date
+    return latest
+
+
+def _latest_dates(ticker: str) -> dict[str, str]:
+    """{report_type: newest generated_date} for a ticker, from the sortable ID scheme."""
+    return _latest_dates_cached(ticker.upper(), int(time.monotonic() // _LATEST_TTL_S))
+
+
 def retrieve(
     text: str,
     ticker: Optional[str] = None,
     report_type: Optional[str] = None,
     k: int = 5,
+    latest_only: bool = False,
 ) -> list[dict]:
     """
     Semantic search over the trade-reports index.
@@ -219,6 +247,10 @@ def retrieve(
         ticker:      Optional UPPERCASE ticker symbol to constrain results.
         report_type: Optional report type string (e.g. "ANALYSIS", "THESIS").
         k:           Number of top results to return (capped at MAX_K).
+        latest_only: With a ticker, search only the newest report of each report
+                     type. Daily reports are near-duplicates, so similarity alone
+                     ranks a months-old report as high as today's. Falls back to
+                     all dates if the scoped search finds nothing.
 
     Returns:
         List of normalized chunk dicts [{id, score, text, metadata}, ...].
@@ -237,6 +269,19 @@ def retrieve(
         conditions.append({"ticker": {"$eq": ticker.upper()}})
     if report_type:
         conditions.append({"report_type": {"$eq": report_type.upper()}})
+    latest: dict[str, str] = {}
+    if ticker and latest_only:
+        try:
+            latest = _latest_dates(ticker)
+        except Exception as exc:
+            logger.warning("retrieve: latest-date lookup failed (%s); searching all dates", exc)
+        if report_type:
+            latest = {t: d for t, d in latest.items() if t == report_type.upper()}
+        if latest:
+            conditions.append({"$or": [
+                {"$and": [{"report_type": {"$eq": t}}, {"generated_date": {"$eq": d}}]}
+                for t, d in latest.items()
+            ]})
     if len(conditions) == 1:
         filter_dict = conditions[0]
     elif len(conditions) > 1:
@@ -281,10 +326,16 @@ def retrieve(
             continue
         if report_type and str(meta.get("report_type", "")).upper() != report_type.upper():
             continue
+        if latest and latest.get(str(meta.get("report_type", "")).upper()) != meta.get("generated_date"):
+            continue
         chunks.append(chunk)
         if len(chunks) >= k:
             break
 
+    if latest and not chunks:
+        # Scoped search came back empty (e.g. date metadata drift) — never turn
+        # that into a no-data answer; fall back to all dates.
+        return retrieve(text, ticker=ticker, report_type=report_type, k=k)
     return chunks
 
 

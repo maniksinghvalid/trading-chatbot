@@ -174,6 +174,87 @@ class TestRetrievePostFilter:
         assert results == []
 
 
+class TestRetrieveLatestOnly:
+    """
+    Daily reports for a ticker are near-duplicates, so similarity alone ranks a
+    July options report as high as today's (the "recent options report on MARA
+    cites August" bug). latest_only=True must scope retrieval to the newest
+    report of each type — dates read from the sortable ID scheme.
+    """
+
+    IDS = [
+        "MARA:OPTIONS:20260721-1306:preamble:0",
+        "MARA:OPTIONS:20261002-1311:preamble:0",
+        "MARA:OPTIONS:20261003-1311:preamble:0",
+        "MARA:ANALYSIS:20260610-0000:summary:0",
+        "MARA:ANALYSIS:20261003-1111:summary:0",
+    ]
+
+    @staticmethod
+    def _hit(_id: str, score: float) -> dict:
+        ticker, rtype, ts = _id.split(":")[:3]
+        return {
+            "id": _id,
+            "score": score,
+            "fields": {
+                "schema_version": 1,
+                "ticker": ticker,
+                "report_type": rtype,
+                "generated_date": f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}",
+                "source_path": f"TRADE-{rtype}-{ticker}.md",
+                "text": _id,
+            },
+        }
+
+    def _fake_index(self, searches: list):
+        ids, hit = self.IDS, self._hit
+
+        class FakeIndex:
+            def list(self, prefix, namespace):
+                yield [i for i in ids if i.startswith(prefix)]
+
+            def search(self, namespace, query):
+                searches.append(query)
+                # Ignores the filter; the stale July report scores highest.
+                return {"result": {"hits": [
+                    hit(ids[0], 0.50), hit(ids[2], 0.45), hit(ids[4], 0.44), hit(ids[1], 0.43),
+                ]}}
+
+        return FakeIndex()
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch, searches: list):
+        import src.pinecone_client as pc
+
+        pc._latest_dates_cached.cache_clear()
+        monkeypatch.setattr(pc, "_get_index", lambda: self._fake_index(searches))
+        monkeypatch.setattr(pc, "_get_namespace", lambda: "trade")
+        return pc
+
+    def test_latest_only_returns_newest_report_per_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        searches: list = []
+        pc = self._patch(monkeypatch, searches)
+
+        results = pc.retrieve("recent options report on MARA", ticker="MARA", k=6, latest_only=True)
+
+        assert [r["id"] for r in results] == [
+            "MARA:OPTIONS:20261003-1311:preamble:0",
+            "MARA:ANALYSIS:20261003-1111:summary:0",
+        ]
+        # Newest dates are pushed server-side too, so top_k isn't spent on old reports.
+        flt = str(searches[0]["filter"])
+        assert "2026-10-03" in flt and "2026-07-21" not in flt
+
+    def test_latest_only_with_report_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pc = self._patch(monkeypatch, [])
+        results = pc.retrieve("iv rank", ticker="MARA", report_type="OPTIONS", latest_only=True)
+        assert [r["id"] for r in results] == ["MARA:OPTIONS:20261003-1311:preamble:0"]
+
+    def test_default_is_similarity_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pc = self._patch(monkeypatch, [])
+        results = pc.retrieve("recent options report on MARA", ticker="MARA", k=6)
+        assert results[0]["id"] == "MARA:OPTIONS:20260721-1306:preamble:0"
+
+
 # ---------------------------------------------------------------------------
 # Unit tests — _list_ids page flattening (regression for the live-API ID bug)
 # ---------------------------------------------------------------------------
